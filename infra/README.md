@@ -127,8 +127,8 @@ pulumi up
 | `agentKeys`, `rateLimitPerMinute`, `gateway/worker.js` | Worker redeployed, Pod untouched |
 | `gpuTypes`, `countryCode`, Pod name | Pod **replaced**, weights re-downloaded (a few minutes); the public URL stays the same |
 
-`podProxyUrl` reaches the Pod directly through RunPod's proxy, bypassing
-Cloudflare; it needs the upstream `clmApiKey` and is for debugging only.
+The Pod exposes no ports: `cloudflared` on the Pod connects out to Cloudflare,
+so the gateway is the only way in.
 
 `pulumi destroy` removes the Pod (stopping its billing, weights included) and
 the Cloudflare resources; the tunnel's ingress config is removed with the

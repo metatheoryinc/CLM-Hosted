@@ -192,7 +192,7 @@ resources:
       volumeInGb: ${volumeSizeGb}
       volumeMountPath: /workspace
       containerDiskInGb: 20
-      ports: 8700/http
+      # no ports: cloudflared connects out, so the Pod is reachable only through the tunnel
       env:
         # resolved by RunPod at start-up, so the key never sits in the Pod's env in plain text
         CLM_API_KEY: "{{ RUNPOD_SECRET_${apiKeySecret.name} }}"
@@ -214,6 +214,4 @@ variables:
 outputs:
   url: https://${hostname}
   podId: ${pod.podId}
-  # direct to the Pod, bypassing Cloudflare; needs the upstream clmApiKey (debugging only)
-  podProxyUrl: https://${pod.podId}-8700.proxy.runpod.net
   costPerHr: ${pod.costPerHr}
