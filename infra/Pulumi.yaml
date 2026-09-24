@@ -192,7 +192,10 @@ resources:
       volumeInGb: ${volumeSizeGb}
       volumeMountPath: /workspace
       containerDiskInGb: 20
-      # no ports: cloudflared connects out, so the Pod is reachable only through the tunnel
+      # No ports: cloudflared connects out, so the Pod is reachable only through the tunnel.
+      # Explicitly empty: the provider omits an unset field from RunPod's edit call, which
+      # leaves the old ports in place (github.com/runpod/pulumi-runpod v0.1.5).
+      ports: ""
       env:
         # resolved by RunPod at start-up, so the key never sits in the Pod's env in plain text
         CLM_API_KEY: "{{ RUNPOD_SECRET_${apiKeySecret.name} }}"
