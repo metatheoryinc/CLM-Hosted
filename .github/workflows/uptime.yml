@@ -1,0 +1,24 @@
+# Uptime check for https://clm.metatheory.dev: the gateway's /health is {"ok": true} only when
+# the Worker, the tunnel, clm-serve and the encoder are all up. A failed run notifies through
+# GitHub's Actions notifications. (GitHub pauses schedules after 60 days without repo activity.)
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: GET /health
+        run: |
+          for attempt in 1 2 3; do
+            body=$(curl -s -m 20 https://clm.metatheory.dev/health) && [ "$body" = '{"ok":true}' ] && exit 0
+            echo "attempt $attempt: ${body:-no response}"; sleep 30
+          done
+          echo "::error::clm.metatheory.dev is unhealthy"; exit 1
