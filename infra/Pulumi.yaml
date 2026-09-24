@@ -1,5 +1,5 @@
 # CLM, the whole stack: one always-on RunPod GPU Pod running ghcr.io/metatheoryinc/clm-hosted
-# (weights on a network volume), reachable only through a Cloudflare Tunnel, with a Worker
+# (weights on the Pod's volume), reachable only through a Cloudflare Tunnel, with a Worker
 # gateway on the public hostname for per-agent keys and rate limits. See infra/README.md.
 #
 #   agent ──► https://<hostname> ── Worker (agent key → upstream key) ── Tunnel ──► Pod :8700
@@ -23,20 +23,20 @@ config:
   registryAuthId:
     type: string
     # the RunPod container registry credential that can pull ghcr.io/metatheoryinc/*
-  dataCenterId:
+  countryCode:
     type: string
-    default: US-MO-2
-    # the Pod and its volume must share a datacenter; changing it replaces both.
-    # Stock varies: check it with the dataCenters query in infra/README.md
+    default: US
+    # RunPod places the Pod in any datacenter in this country with one of gpuTypes free
   gpuTypes:
     type: array
     items:
       type: string
-    default: ["NVIDIA L4"]
-    # 24 GB+ cards in stock in dataCenterId, tried in order
+    default: ["NVIDIA L4", "NVIDIA RTX PRO 4500 Blackwell Server Edition", "NVIDIA RTX 6000 Ada Generation"]
+    # 24 GB+ cards, cheapest first; stock is thin, so list several (query in infra/README.md)
   volumeSizeGb:
     type: integer
     default: 40
+    # the Pod's own volume at /workspace: weights (~16 GB), head and logs
   clmApiKey:
     type: string
     secret: true
@@ -72,16 +72,6 @@ resources:
     options:
       version: 0.1.5
       pluginDownloadURL: github://api.github.com/runpod/pulumi-runpod
-
-  weights:
-    type: runpod:NetworkVolume
-    properties:
-      name: clm-weights-${pulumi.stack}
-      size: ${volumeSizeGb}
-      dataCenterId: ${dataCenterId}
-    options:
-      provider: ${runpod}
-      protect: true   # holds the ~16 GB of downloaded weights
 
   cloudflare:
     type: pulumi:providers:cloudflare
@@ -191,12 +181,14 @@ resources:
       name: clm-${pulumi.stack}
       imageName: ghcr.io/metatheoryinc/clm-hosted:${imageTag}
       containerRegistryAuthId: ${registryAuthId}
-      cloudType: SECURE         # network volumes are Secure Cloud only
+      cloudType: SECURE
       computeType: GPU
       gpuCount: 1
       gpuTypeIdList: ${gpuTypes}
-      dataCenterId: ${dataCenterId}
-      networkVolumeId: ${weights.networkVolumeId}
+      # No network volume: it would pin the Pod to one datacenter, and single-site stock is
+      # too thin. The Pod volume survives restarts; replacing the Pod re-downloads the weights.
+      countryCode: ${countryCode}
+      volumeInGb: ${volumeSizeGb}
       volumeMountPath: /workspace
       containerDiskInGb: 20
       ports: 8700/http
@@ -224,4 +216,3 @@ outputs:
   # direct to the Pod, bypassing Cloudflare; needs the upstream clmApiKey (debugging only)
   podProxyUrl: https://${pod.podId}-8700.proxy.runpod.net
   costPerHr: ${pod.costPerHr}
-  networkVolumeId: ${weights.networkVolumeId}

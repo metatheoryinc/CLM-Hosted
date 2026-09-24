@@ -12,7 +12,7 @@ runners and pushes `ghcr.io/metatheoryinc/clm-hosted:latest` and `:<sha>`.
 The package is private; RunPod pulls it with a GHCR registry credential
 (a GitHub token with `read:packages`), whose ID is in the Pulumi config.
 
-No weights are baked in. On first boot they download to the volume at
+No weights are baked in. On first boot they download to the Pod volume at
 `/workspace`: Qwen3-8B (~16 GB) to `/workspace/hf`, the CLM head (~75 MB) to
 `/workspace/clm`, so restarts skip the downloads.
 

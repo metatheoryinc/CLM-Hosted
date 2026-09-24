@@ -5,12 +5,12 @@
 ```
 agent ──► https://<hostname> ── gateway Worker ── Cloudflare Tunnel ──► RunPod Pod :8700
           per-agent key → upstream key,           outbound from the     vLLM Qwen3-8B + clm-serve,
-          per-agent rate limit, request logs      Pod, no open port     weights on a network volume
+          per-agent rate limit, request logs      Pod, no open port     weights on the Pod volume
 ```
 
 | | resources |
 | --- | --- |
-| RunPod | GPU Pod (`ghcr.io/metatheoryinc/clm-hosted:<imageTag>`), 40 GB network volume (protected), secrets for the upstream key and tunnel token |
+| RunPod | GPU Pod (`ghcr.io/metatheoryinc/clm-hosted:<imageTag>`) with a 40 GB volume, secrets for the upstream key and tunnel token |
 | Cloudflare | tunnel + ingress config, proxied CNAME for `hostname`, gateway Worker ([gateway/worker.js](gateway/worker.js)) and its route |
 
 The image itself is built by `.github/workflows/image.yml`.
@@ -70,18 +70,18 @@ pulumi config set --secret clmApiKey "$(openssl rand -hex 32)"
 pulumi config set --secret agentKeys "{\"agent-a\": \"$(openssl rand -hex 32)\"}"
 ```
 
-Optional: `hostname` (default `clm.metatheory.dev`), `dataCenterId` (default
-`US-MO-2`) and `gpuTypes` (default `["NVIDIA L4"]`), `rateLimitPerMinute` (per
-agent, default 600), `imageTag`.
+Optional: `hostname` (default `clm.metatheory.dev`), `countryCode` (default
+`US`), `gpuTypes`, `rateLimitPerMinute` (per agent, default 600), `imageTag`.
 
-The volume pins the Pod to one datacenter, so pick one near your agents with a
-24 GB+ GPU in stock (secure cloud, network storage):
+RunPod places the Pod in any secure-cloud datacenter in `countryCode` with one
+of `gpuTypes` free. GPU stock is thin, so keep several 24 GB+ types listed;
+this shows what is in stock where:
 
 ```bash
 curl -s https://api.runpod.io/graphql -H "Authorization: Bearer $RUNPOD_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ dataCenters { id location storageSupport gpuAvailability { gpuTypeId stockStatus } } }"}' \
-  | jq -r '.data.dataCenters[] | select(.storageSupport) | "\(.id)\t\([.gpuAvailability[]? | select(.stockStatus != null and .stockStatus != "None") | .gpuTypeId] | join(", "))"'
+  -d '{"query": "{ dataCenters { id location gpuAvailability { gpuTypeId stockStatus } } }"}' \
+  | jq -r '.data.dataCenters[] | "\(.id)\t\([.gpuAvailability[]? | select(.stockStatus != null and .stockStatus != "None") | .gpuTypeId] | join(", "))"'
 ```
 
 ## Deploy
@@ -91,7 +91,7 @@ pulumi up
 pulumi stack output url
 ```
 
-The first boot downloads Qwen3-8B (~16 GB) and the CLM head onto the volume;
+The first boot downloads Qwen3-8B (~16 GB) and the CLM head onto the Pod volume;
 follow it in the Pod's logs on RunPod. Then, with an agent key:
 
 ```bash
@@ -125,13 +125,11 @@ pulumi up
 | --- | --- |
 | `imageTag` (pin a commit SHA from the image workflow) | Pod updated in place |
 | `agentKeys`, `rateLimitPerMinute`, `gateway/worker.js` | Worker redeployed, Pod untouched |
-| `gpuTypes`, `dataCenterId`, Pod name or volume | Pod **replaced**; the public URL stays the same |
-| `dataCenterId` | also replaces the volume, which is `protect`ed; unprotect it deliberately |
+| `gpuTypes`, `countryCode`, Pod name | Pod **replaced**, weights re-downloaded (a few minutes); the public URL stays the same |
 
 `podProxyUrl` reaches the Pod directly through RunPod's proxy, bypassing
 Cloudflare; it needs the upstream `clmApiKey` and is for debugging only.
 
-`pulumi destroy --exclude-protected` removes the Pod (stopping its billing)
-and the Cloudflare resources but keeps the volume and its downloaded weights
-(the volume itself bills per GB); unprotect it (`pulumi state unprotect`) to
-destroy it too. The tunnel's ingress config is removed with the tunnel.
+`pulumi destroy` removes the Pod (stopping its billing, weights included) and
+the Cloudflare resources; the tunnel's ingress config is removed with the
+tunnel.
