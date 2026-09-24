@@ -66,6 +66,7 @@ def run(tmp_path):
                                    "threshold": threshold, "timeout": 1.0}) if config else "{}")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLM_")}
         env["CLM_HOOK_CONFIG"] = str(cfg)
+        env["CLM_HOOK_STATE_DIR"] = str(tmp_path / "claims")
         t0 = time.perf_counter()
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(event), capture_output=True, text=True, env=env,
                            timeout=30)
@@ -160,3 +161,12 @@ def test_secrets_are_redacted(text):
 def test_long_inputs_are_clipped():
     s = hook.describe_input({"content": "x" * 5000, "file_path": "/repo/a.py"})
     assert len(s) < hook.MAX_INPUT + 100 and "more characters" in s and "file_path: /repo/a.py" in s
+
+
+def test_a_second_registration_of_the_hook_steps_aside(run, tmp_path):
+    e = pre(tid="toolu_dup")
+    _, _, clm1 = run(e)
+    assert len(clm1.wait(1)) == 1                     # (before the next run rewrites the config)
+    _, _, clm2 = run(e)                               # same event again: the other registration
+    time.sleep(0.5)
+    assert clm2.systemone == [] and clm2.decisions == []

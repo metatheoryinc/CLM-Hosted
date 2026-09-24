@@ -23,8 +23,10 @@ measures the log.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
+import tempfile
 import re
 import subprocess
 import sys
@@ -157,6 +159,31 @@ def run_background(payload: dict) -> None:
                                     "created_at": now()}, 10)
 
 
+def first_claim(event: dict) -> bool:
+    """True for the first copy of this hook to see this event.
+
+    The hook may be registered twice (a repo's .claude/settings.json and ~/.claude/settings.json);
+    both copies run, so the second one steps aside. Claims older than a day are swept.
+    """
+    d = os.environ.get("CLM_HOOK_STATE_DIR") or os.path.join(
+        tempfile.gettempdir(), f"clm-hook-{os.getuid() if hasattr(os, 'getuid') else 'u'}")
+    os.makedirs(d, exist_ok=True)
+    key = hashlib.sha1(f"{event.get('hook_event_name')}:{event.get('tool_use_id')}".encode()).hexdigest()
+    try:
+        os.close(os.open(os.path.join(d, key), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False
+    if int(key[:2], 16) == 0:                 # ~1 call in 256 sweeps old claims
+        cutoff = time.time() - 86400
+        for f in os.scandir(d):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    os.unlink(f.path)
+            except OSError:
+                pass
+    return True
+
+
 def decide(clm: dict, cfg: dict) -> dict | None:
     """Active mode: CLM may only tighten. -> PreToolUse hook output, or None to stay out of it."""
     if "error" in clm or clm["probability"] < float(cfg["threshold"]) or clm["choice"] == "allow":
@@ -183,7 +210,7 @@ def main() -> int:
         cfg = load_config()
         if cfg.get("mode") not in ("shadow", "active") or not cfg.get("base_url") or not cfg.get("api_key"):
             return 0
-        if not event.get("tool_use_id"):
+        if not event.get("tool_use_id") or not first_claim(event):
             return 0
         name = event.get("hook_event_name")
         if name == "PreToolUse":

@@ -38,13 +38,21 @@ chmod 600 ~/.config/clm/claude-code.json
 It takes effect on the next tool call. `CLM_HOOK_MODE=off claude` disables it for one
 session; `"mode": "off"` disables it everywhere.
 
-### In your other repos
+### In every repo
 
-The config file is per machine, so to classify tool calls in every project, add the same
-hooks to `~/.claude/settings.json` with an absolute path to `clm_hook.py` (copy the
-`hooks` block from this repo's `.claude/settings.json` and replace
-`"$CLAUDE_PROJECT_DIR"/integrations/claude_code/clm_hook.py` with the full path). The
-script needs only `python3`.
+The config file is per machine; to classify tool calls in every project, add the hooks
+to `~/.claude/settings.json` too, pointing at your checkout of this repo. Use this
+command (not a bare `python3 <path>`): if the file is ever missing, `python3` exits
+with code 2, which Claude Code treats as "block the tool call", in every session.
+
+```json
+"command": "f=\"/path/to/CLM-Hosted/integrations/claude_code/clm_hook.py\"; [ -f \"$f\" ] && python3 \"$f\"; exit 0"
+```
+
+Register it for the same five events as this repo's
+[.claude/settings.json](../../.claude/settings.json) (`matcher: ""`, `timeout: 5`,
+`async: true` on all but `PreToolUse`). In this repo both registrations fire; the
+hook handles each event once and the second copy exits.
 
 ## Measure
 
