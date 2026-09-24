@@ -39,9 +39,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // unauthenticated liveness, for uptime checks
+    // unauthenticated liveness for uptime checks: only whether the Pod and its encoder
+    // are up, not the models or cache details clm-serve's /health reports
     if (url.pathname === "/health" && request.method === "GET") {
-      return fetch(new Request(request, { headers: {} }));
+      let ok = false;
+      try {
+        const upstream = await fetch(new Request(url, { headers: {} }));
+        ok = upstream.ok && (await upstream.json()).embedder === true;
+      } catch {}
+      return Response.json({ ok }, { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } });
     }
 
     const agent = await agentFor(request, JSON.parse(env.AGENT_KEYS));

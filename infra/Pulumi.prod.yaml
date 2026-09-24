@@ -3,3 +3,14 @@ config:
     secure: AAABAHnj5YYk72Nmx8ykWnsQdr/EnEcN/F9KRX5lcJPgfDH6aF23ZkQzqcjEzaUvHqp37/4D1cgVIu7zc218vQyDjbxzVJNNfg//32W41TSCVg==
   clm-hosted:cloudflareApiToken:
     secure: AAABANhSsQMPJiFCjixpZ5d7c5Bqi9Mzzf4PHCKLinlb4kio2LN+3VTV4kYYT+tALmq9t4BIPhxO30qRpxAL19XNSbDlimiHxRb//xJgAdqrRH1QZg==
+  clm-hosted:clmApiKey:
+    secure: AAABAOxC7bG9WUvDq2UV7Y7ArlV5Vb6w1wWXAEllBw932alnN0usKgYxa6ROpSD4zQKKTZlueRPo4dhmw7+N+wVk9MMom4ZF1FSIOBhZXc632RA3CdQy4YUEN3T2H/fe
+  clm-hosted:agentKeys:
+    secure: AAABALP3OO+3aRUA54rSvgqQPV1wP/aE4T+ySX10LckWdO+yiuaIa2UsQwSkD9MsWOqWN+desLB1pGEc+Wmvio6KCaJjkoqC0NRQgfdvcDT64e1lPcH8D55mCfK+ZFg71OX9dEruth85xnHGGXHG
+  clm-hosted:registryAuthId: cmuddk8gr003psxunmobd4qxd
+  clm-hosted:cloudflareAccountId: daa733811c7150ec3148993b991a2400
+  clm-hosted:cloudflareZoneId: f8a3822c528b323b90dc68789244791e
+  clm-hosted:dataCenterId: US-MO-2
+  clm-hosted:gpuTypes:
+    - NVIDIA L4
+  clm-hosted:imageTag: 2c06c06a049704a421eaad77b58efca11a6fc976

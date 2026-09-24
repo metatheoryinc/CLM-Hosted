@@ -71,8 +71,18 @@ pulumi config set --secret agentKeys "{\"agent-a\": \"$(openssl rand -hex 32)\"}
 ```
 
 Optional: `hostname` (default `clm.metatheory.dev`), `dataCenterId` (default
-`US-TX-3`; pick one near your agents with 24 GB GPUs in stock), `gpuTypes`,
-`rateLimitPerMinute` (per agent, default 600), `imageTag`.
+`US-MO-2`) and `gpuTypes` (default `["NVIDIA L4"]`), `rateLimitPerMinute` (per
+agent, default 600), `imageTag`.
+
+The volume pins the Pod to one datacenter, so pick one near your agents with a
+24 GB+ GPU in stock (secure cloud, network storage):
+
+```bash
+curl -s https://api.runpod.io/graphql -H "Authorization: Bearer $RUNPOD_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ dataCenters { id location storageSupport gpuAvailability { gpuTypeId stockStatus } } }"}' \
+  | jq -r '.data.dataCenters[] | select(.storageSupport) | "\(.id)\t\([.gpuAvailability[]? | select(.stockStatus != null and .stockStatus != "None") | .gpuTypeId] | join(", "))"'
+```
 
 ## Deploy
 
