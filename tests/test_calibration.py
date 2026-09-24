@@ -114,3 +114,19 @@ def test_http(engine):
     assert c.post("/v1/systemone", json={"state": "s", "questions": Q, "calibrate": "x"}, headers=h).status_code == 422
     r = c.post("/v1/rank", json={"question": "q", "answers": ["x", "y"], "calibrate": True}, headers=h)
     assert r.status_code == 200
+
+
+def test_encoder_endpoint_returns_the_serving_embeddings(engine):
+    import base64
+    from fastapi.testclient import TestClient
+    from clm.server import create_app
+    c = TestClient(create_app(engine, api_key="k", ui=False))
+    h = {"Authorization": "Bearer k"}
+    r = c.post("/v1/encoder", json={"texts": ["a", "b"]}, headers=h)
+    assert r.status_code == 200 and r.json()["dim"] == HIDDEN
+    got = np.frombuffer(base64.b64decode(r.json()["embeddings"][1]), dtype=np.float32)
+    want, _ = TextEmbedder().embed(["b"])
+    assert np.allclose(got, want[0])
+    assert c.post("/v1/encoder", json={"texts": []}, headers=h).status_code == 422
+    assert c.post("/v1/encoder", json={"texts": ["x"] * 257}, headers=h).status_code == 422
+    assert c.post("/v1/encoder", json={"texts": ["x"]}).status_code == 401

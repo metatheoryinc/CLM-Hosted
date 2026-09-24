@@ -10,6 +10,7 @@
                                                        -> {"model", "ranked": [{rank, candidate, prob}]}
     POST /v1/verify      {"trajectories": [{"id", "steps": [{"state", "action"}]}], "model": "deepswe",
                           "window": 12}                -> {"model", "best", "trajectories": [{id, score, ...}]}
+    POST /v1/encoder     {"texts": [..]}               -> {"dim", "dtype", "embeddings": [base64 float32], "usage"}
     GET  /v1/models      -> {"models": [{"name", "description", "release_date"}]}
     GET  /health         -> {"ok": true, ...}
     GET  /               -> the playground: a zero-dependency web UI for the endpoint
@@ -61,6 +62,9 @@ class _RevalidatingStatic(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+MAX_ENCODER_TEXTS = 256
 
 
 def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False) -> FastAPI:
@@ -154,6 +158,35 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
         except EmbedderError as e:
             raise HTTPException(502, str(e)) from e
         return JSONResponse({"model": body.get("model") or DEFAULT_MODEL, "ranked": ranked},
+                            headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
+
+    @app.post("/v1/encoder")
+    async def encoder(request: Request, authorization: str | None = Header(default=None)):
+        """{texts: [..]} -> the encoder embeddings /v1/systemone uses for those texts.
+
+        Same embedder, truncation and L2 normalisation as serving, so a head trained on
+        them sees exactly what it will be served (``train/finetune.py --embed-cache``).
+        Float32, base64, in order.
+        """
+        auth(authorization)
+        try:
+            body = await request.json()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"body is not JSON: {e}") from e
+        texts = body.get("texts") if isinstance(body, dict) else None
+        if not isinstance(texts, list) or not 1 <= len(texts) <= MAX_ENCODER_TEXTS or \
+                not all(isinstance(t, str) for t in texts):
+            raise HTTPException(422, f"texts must be a list of 1..{MAX_ENCODER_TEXTS} strings")
+        t0 = time.perf_counter()
+        try:
+            vecs, tokens = await asyncio.get_running_loop().run_in_executor(None, engine.embedder.embed, texts)
+        except EmbedderError as e:
+            raise HTTPException(502, str(e)) from e
+        import base64
+        import numpy as np
+        out = [base64.b64encode(np.asarray(v, dtype=np.float32).tobytes()).decode() for v in vecs]
+        return JSONResponse({"dim": int(vecs.shape[1]), "dtype": "float32", "embeddings": out,
+                             "usage": {"input_tokens": tokens}},
                             headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
 
     @app.post("/v1/verify")
