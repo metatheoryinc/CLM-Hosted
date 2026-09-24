@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Claude Code hook: CLM classifies every tool call as allow / review / block.
+"""Claude Code hook: CLM classifies every tool call as allow / review / block, and
+every subagent task by the model tier it needs (haiku / sonnet / opus).
 
 Standard library only. Registered for PreToolUse, PermissionRequest, PermissionDenied,
 PostToolUse and PostToolUseFailure (see .claude/settings.json); off unless configured:
@@ -15,6 +16,12 @@ PostToolUse and PostToolUseFailure (see .claude/settings.json); off unless confi
   CLM's pick reaches ``threshold`` (default 0.9), a ``review`` pick forces the permission
   prompt and a ``block`` pick denies the call. It never approves anything: CLM can only
   make Claude Code stricter. Any error or timeout leaves the call to Claude Code.
+
+Subagents (the ``Agent`` tool) get a second, shadow-only question: which model tier the
+task needs, logged as ``routing/claude-code-subagents`` with the model Claude asked for, if
+any, as the baseline. With ``"raw_log": true`` the raw Agent / SubagentStart / SubagentStop
+payloads are also appended to ``~/.config/clm/claude-code-events.jsonl`` (local only), to
+see what Claude Code reports about a subagent before relying on it.
 
 Tool inputs are truncated and likely secrets (tokens, keys, passwords) redacted before
 they leave the machine. ``clm-decisions report <base_url> --workflow routing/claude-code-tools``
@@ -44,10 +51,22 @@ OPTIONS = {
     "block": "Destroys data or exposes secrets: deletes files irreversibly, force-pushes, "
              "or prints credentials.",
 }
+AGENT_TOOLS = ("Agent", "Task")            # "Task" is the tool's former name
+SUBAGENT_WORKFLOW = "routing/claude-code-subagents"
+SUBAGENT_INSTRUCTIONS = "Which model is capable enough for this subagent task, at the lowest cost?"
+SUBAGENT_OPTIONS = {
+    "haiku": "Searches, reads or lists code and files and reports what it finds.",
+    "sonnet": "Makes a focused code change, writes tests, or fixes a well-described bug.",
+    "opus": "Designs or plans, debugs a hard problem across many files, or makes a judgment call.",
+}
+RAW_EVENTS = ("SubagentStart", "SubagentStop")
+# the tier of the model that actually ran, from the Agent tool's result (resolvedModel)
+TIERS = (("haiku", "haiku"), ("sonnet", "sonnet"), ("opus", "opus"), ("fable", "opus"))
 # Claude Code's own decision, from the event that reports it (higher rank wins)
 BASELINE = {"PostToolUse": ("allow", 1), "PostToolUseFailure": ("allow", 1),
             "PermissionRequest": ("review", 2), "PermissionDenied": ("block", 3)}
-DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, "timeout": 1.5}
+DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, "timeout": 1.5,
+            "raw_log": False, "raw_log_path": "~/.config/clm/claude-code-events.jsonl"}
 MAX_FIELD, MAX_INPUT = 800, 3000
 
 SECRET_PATTERNS = [
@@ -89,6 +108,23 @@ def state_of(event: dict) -> dict:
             "working directory": event.get("cwd", ""), "permission mode": event.get("permission_mode", "")}
 
 
+def subagent_state(event: dict) -> dict:
+    """What the subagent is asked to do. Not the model Claude requested: that is the baseline."""
+    ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    return {"task": clip(redact(str(ti.get("description", ""))), MAX_FIELD),
+            "instructions": clip(redact(str(ti.get("prompt", ""))), MAX_INPUT),
+            "subagent type": str(ti.get("subagent_type") or "general-purpose")}
+
+
+def raw_log(event: dict, path: str) -> None:
+    """Append a raw hook payload to a local file (never sent anywhere)."""
+    path = os.path.expanduser(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"logged_at": now(), **event}, ensure_ascii=False, default=str) + "\n")
+
+
 def load_config() -> dict:
     cfg = dict(DEFAULTS)
     path = os.environ.get("CLM_HOOK_CONFIG") or os.path.expanduser("~/.config/clm/claude-code.json")
@@ -118,12 +154,13 @@ def post(cfg: dict, path: str, body: dict, timeout: float):
         return json.load(r)
 
 
-def classify(cfg: dict, state: dict, timeout: float) -> dict:
+def classify(cfg: dict, state: dict, timeout: float, instructions: str = INSTRUCTIONS,
+             options: dict = OPTIONS) -> dict:
     t0 = time.perf_counter()
     try:
         j = post(cfg, "/v1/systemone", {"state": state, "model": cfg.get("model", "clm-latest"),
-                                        "questions": {QID: {"type": "choice", "instructions": INSTRUCTIONS,
-                                                            "criteria": OPTIONS}}}, timeout)
+                                        "questions": {QID: {"type": "choice", "instructions": instructions,
+                                                            "criteria": options}}}, timeout)
         a = j["answers"][QID]
         return {"model": j.get("model"), "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
                 "confidence": float(a["confidence"]), "probabilities": a["probabilities"],
@@ -140,6 +177,47 @@ def record(event: dict, state: dict, clm: dict, cfg: dict, acted: str) -> dict:
             "meta": {k: event.get(k) for k in ("session_id", "tool_name", "permission_mode", "agent_type")}}
 
 
+def subagent_record(event: dict, state: dict, clm: dict) -> dict:
+    """Shadow only. The baseline is the tier Claude asked for, when it asked for one of them."""
+    ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    requested = ti.get("model")
+    rec = {"id": f"{event['tool_use_id']}:model", "workflow": SUBAGENT_WORKFLOW, "created_at": now(),
+           "mode": "shadow", "state": state,
+           "questions": {QID: {"type": "choice", "instructions": SUBAGENT_INSTRUCTIONS,
+                               "criteria": SUBAGENT_OPTIONS}},
+           "clm": clm, "acted": "baseline",
+           "meta": {"session_id": event.get("session_id"), "requested_model": requested or "not set",
+                    "agent_type": event.get("agent_type")}}
+    if requested in SUBAGENT_OPTIONS:
+        rec["baseline"] = {QID: {"label": requested}}
+    return rec
+
+
+def tier_of(model: str | None) -> str | None:
+    m = (model or "").lower()
+    return next((tier for name, tier in TIERS if name in m), None)
+
+
+def subagent_result(event: dict) -> list[dict]:
+    """After an Agent call: the tier that actually ran (baseline) and what the run cost (outcome).
+
+    The outcome carries no ok/label: whether a cheaper model would have done is not known here.
+    """
+    tr = event.get("tool_response") if isinstance(event.get("tool_response"), dict) else {}
+    rid, t = f"{event['tool_use_id']}:model", now()
+    usage = tr.get("usage") if isinstance(tr.get("usage"), dict) else {}
+    out = [{"event": "outcome", "id": rid, "created_at": t, "ok": None, "label": None,
+            "run": {"status": tr.get("status") or ("failed" if event.get("hook_event_name") == "PostToolUseFailure"
+                                                   else None),
+                    "resolved_model": tr.get("resolvedModel"), "total_tokens": tr.get("totalTokens"),
+                    "output_tokens": usage.get("output_tokens"), "duration_ms": tr.get("totalDurationMs"),
+                    "tool_uses": tr.get("totalToolUseCount"), "tool_stats": tr.get("toolStats")}}]
+    tier = tier_of(tr.get("resolvedModel"))
+    if tier:
+        out.append({"event": "baseline", "id": rid, "label": tier, "rank": 2, "created_at": t})
+    return out
+
+
 def background(payload: dict) -> None:
     """Hand ``payload`` to a detached copy of this script, so the hook returns immediately."""
     p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--background"], stdin=subprocess.PIPE,
@@ -150,9 +228,15 @@ def background(payload: dict) -> None:
 
 def run_background(payload: dict) -> None:
     cfg, event = load_config(), payload["event"]
-    if payload["kind"] == "record":
+    if payload["kind"] == "subagent":
+        clm = classify(cfg, payload["state"], 10, SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
+        post(cfg, "/v1/decisions", subagent_record(event, payload["state"], clm), 10)
+    elif payload["kind"] == "record":
         clm = payload.get("clm") or classify(cfg, payload["state"], timeout=10)
         post(cfg, "/v1/decisions", record(event, payload["state"], clm, cfg, payload.get("acted", "baseline")), 10)
+    elif payload["kind"] == "subagent_result":
+        for e in subagent_result(event):
+            post(cfg, "/v1/decisions", e, 10)
     else:
         label, rank = BASELINE[event["hook_event_name"]]
         post(cfg, "/v1/decisions", {"event": "baseline", "id": event["tool_use_id"], "label": label, "rank": rank,
@@ -210,9 +294,16 @@ def main() -> int:
         cfg = load_config()
         if cfg.get("mode") not in ("shadow", "active") or not cfg.get("base_url") or not cfg.get("api_key"):
             return 0
+        name = event.get("hook_event_name")
+        is_agent = event.get("tool_name") in AGENT_TOOLS
+        if name in RAW_EVENTS:                       # no tool_use_id: dedupe on the subagent's id
+            if cfg.get("raw_log") and first_claim(dict(event, tool_use_id=event.get("agent_id"))):
+                raw_log(event, cfg["raw_log_path"])
+            return 0
         if not event.get("tool_use_id") or not first_claim(event):
             return 0
-        name = event.get("hook_event_name")
+        if is_agent and cfg.get("raw_log"):
+            raw_log(event, cfg["raw_log_path"])
         if name == "PreToolUse":
             state = state_of(event)
             if cfg["mode"] == "active":
@@ -224,8 +315,12 @@ def main() -> int:
                     print(json.dumps(out))
             else:
                 background({"kind": "record", "event": event, "state": state})
+            if is_agent:
+                background({"kind": "subagent", "event": event, "state": subagent_state(event)})
         elif name in BASELINE:
             background({"kind": "baseline", "event": event})
+            if is_agent and name in ("PostToolUse", "PostToolUseFailure"):
+                background({"kind": "subagent_result", "event": event})
     except Exception:  # noqa: BLE001  (a hook must never break the session)
         pass
     return 0

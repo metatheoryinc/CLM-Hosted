@@ -58,12 +58,12 @@ class FakeCLM:
 def run(tmp_path):
     servers = []
 
-    def _run(event, mode="shadow", probs=None, delay=0.0, threshold=0.9, config=True):
+    def _run(event, mode="shadow", probs=None, delay=0.0, threshold=0.9, config=True, extra=None):
         clm = FakeCLM(probs, delay)
         servers.append(clm)
         cfg = tmp_path / "cfg.json"
         cfg.write_text(json.dumps({"mode": mode, "base_url": clm.url, "api_key": "agent-key",
-                                   "threshold": threshold, "timeout": 1.0}) if config else "{}")
+                                   "threshold": threshold, "timeout": 1.0, **(extra or {})}) if config else "{}")
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLM_")}
         env["CLM_HOOK_CONFIG"] = str(cfg)
         env["CLM_HOOK_STATE_DIR"] = str(tmp_path / "claims")
@@ -170,3 +170,86 @@ def test_a_second_registration_of_the_hook_steps_aside(run, tmp_path):
     _, _, clm2 = run(e)                               # same event again: the other registration
     time.sleep(0.5)
     assert clm2.systemone == [] and clm2.decisions == []
+
+
+# ── subagents ────────────────────────────────────────────────────────────────
+
+def agent_call(model=None, tid="toolu_a"):
+    ti = {"description": "Find the config loader", "prompt": "Search the repo for where settings are parsed.",
+          "subagent_type": "Explore"}
+    if model:
+        ti["model"] = model
+    return pre(tool="Agent", tool_input=ti, tid=tid)
+
+
+def test_agent_calls_also_get_a_model_tier_decision(run):
+    p, took, clm = run(agent_call(model="haiku"), probs={"haiku": 0.7, "sonnet": 0.2, "opus": 0.1})
+    assert p.stdout == "" and took < 1.0
+    recs = {r["workflow"]: r for r in clm.wait(2)}
+    sub = recs["routing/claude-code-subagents"]
+    assert sub["id"] == "toolu_a:model" and recs["routing/claude-code-tools"]["id"] == "toolu_a"
+    assert sub["state"] == {"task": "Find the config loader",
+                            "instructions": "Search the repo for where settings are parsed.",
+                            "subagent type": "Explore"}             # the requested model is not a feature
+    assert sub["baseline"] == {"route": {"label": "haiku"}} and sub["meta"]["requested_model"] == "haiku"
+    assert set(sub["questions"]["route"]["criteria"]) == {"haiku", "sonnet", "opus"} and sub["acted"] == "baseline"
+    questions = {b["questions"]["route"]["instructions"] for _, b in clm.systemone}
+    assert len(questions) == 2                                      # the risk and the tier question
+
+
+def test_unset_or_unknown_models_have_no_baseline(run):
+    for model, tid in ((None, "toolu_b"), ("fable", "toolu_c")):
+        _, _, clm = run(agent_call(model=model, tid=tid))
+        sub = next(r for r in clm.wait(2) if r["workflow"] == "routing/claude-code-subagents")
+        assert "baseline" not in sub and sub["meta"]["requested_model"] == (model or "not set")
+
+
+def test_other_tools_get_no_tier_decision(run):
+    _, _, clm = run(pre())
+    time.sleep(0.5)
+    assert [r["workflow"] for r in clm.wait(1)] == ["routing/claude-code-tools"]
+
+
+def test_raw_subagent_payloads_are_logged_locally_when_asked(run, tmp_path):
+    log = tmp_path / "events.jsonl"
+    extra = {"raw_log": True, "raw_log_path": str(log)}
+    _, _, first = run(agent_call(tid="toolu_r"), extra=extra)
+    first.wait(2)                                    # (before the next run rewrites the config)
+    stop = {"hook_event_name": "SubagentStop", "session_id": "s1", "agent_id": "ag1", "agent_type": "Explore",
+            "last_assistant_message": "done"}
+    _, _, clm = run(stop, extra=extra)
+    run(stop, extra=extra)                                           # the second registration
+    time.sleep(0.5)
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [e["hook_event_name"] for e in lines] == ["PreToolUse", "SubagentStop"]
+    assert lines[1]["agent_id"] == "ag1" and "logged_at" in lines[1] and oct(log.stat().st_mode)[-3:] == "600"
+    assert clm.systemone == [] and clm.decisions == []               # raw events never leave the machine
+
+
+def test_no_raw_log_unless_asked(run, tmp_path):
+    run({"hook_event_name": "SubagentStop", "agent_id": "ag2"}, extra={"raw_log_path": str(tmp_path / "x.jsonl")})
+    time.sleep(0.3)
+    assert not (tmp_path / "x.jsonl").exists()
+
+
+def test_agent_results_report_the_tier_that_ran_and_the_cost(run):
+    e = dict(agent_call(tid="toolu_done"), hook_event_name="PostToolUse", tool_response={
+        "status": "completed", "resolvedModel": "claude-haiku-4-5-20251001", "totalTokens": 37739,
+        "totalDurationMs": 6817, "totalToolUseCount": 1, "usage": {"output_tokens": 384},
+        "toolStats": {"readCount": 1, "editFileCount": 0}, "content": [{"type": "text", "text": "secret answer"}]})
+    _, _, clm = run(e)
+    got = clm.wait(3)
+    by = {(x.get("event"), x["id"]): x for x in got}
+    assert by[("baseline", "toolu_done")]["label"] == "allow"                  # the tool-risk baseline
+    assert by[("baseline", "toolu_done:model")]["label"] == "haiku"            # the tier that ran
+    run_ = by[("outcome", "toolu_done:model")]["run"]
+    assert run_ == {"status": "completed", "resolved_model": "claude-haiku-4-5-20251001", "total_tokens": 37739,
+                    "output_tokens": 384, "duration_ms": 6817, "tool_uses": 1,
+                    "tool_stats": {"readCount": 1, "editFileCount": 0}}
+    assert "secret answer" not in json.dumps(got)                              # the subagent's output stays local
+
+
+@pytest.mark.parametrize("model, tier", [("claude-opus-5-5", "opus"), ("claude-fable-5-1", "opus"),
+                                         ("claude-sonnet-5", "sonnet"), ("some-other-model", None), (None, None)])
+def test_tier_of(model, tier):
+    assert hook.tier_of(model) == tier

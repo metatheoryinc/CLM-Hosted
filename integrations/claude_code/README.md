@@ -49,15 +49,39 @@ with code 2, which Claude Code treats as "block the tool call", in every session
 "command": "f=\"/path/to/CLM-Hosted/integrations/claude_code/clm_hook.py\"; [ -f \"$f\" ] && python3 \"$f\"; exit 0"
 ```
 
-Register it for the same five events as this repo's
+Register it for the same seven events as this repo's
 [.claude/settings.json](../../.claude/settings.json) (`matcher: ""`, `timeout: 5`,
-`async: true` on all but `PreToolUse`). In this repo both registrations fire; the
+`async: true` on all but `PreToolUse`: PermissionRequest, PermissionDenied,
+PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop). In this repo both registrations fire; the
 hook handles each event once and the second copy exits.
+
+## Subagent model tiers
+
+Every subagent launch (the `Agent` tool) also gets a shadow-only second question: which
+tier, `haiku`, `sonnet` or `opus`, is enough for the task. It is logged as
+`routing/claude-code-subagents` with what CLM would pick and, when the subagent finishes,
+the tier that actually ran (from the tool result's `resolvedModel`) and what the run cost
+(status, tokens, duration, tool counts). The subagent's output itself is not sent. CLM
+only sees the task description, prompt and subagent type, not the model Claude asked for.
+
+Subagents without a `model` inherit the main conversation's model, so a search task can
+run on the most expensive tier; the report shows how often CLM would have picked a cheaper
+one. There is no active mode for this yet: a wrong downgrade costs quality, so it needs
+labels (was the cheaper tier good enough?) before it changes anything.
+
+`"raw_log": true` in the config also appends the raw Agent, SubagentStart and
+SubagentStop payloads to `~/.config/clm/claude-code-events.jsonl` (local only, mode 600),
+for checking what Claude Code reports. SubagentStop carries no model or cost; the
+Agent tool's `PostToolUse` result does.
 
 ## Measure
 
 ```bash
 clm-decisions report https://clm.metatheory.dev --workflow routing/claude-code-tools
+```
+
+```bash
+clm-decisions report https://clm.metatheory.dev --workflow routing/claude-code-subagents
 ```
 
 The baseline is Claude Code's permission system, so "agreement" is how often CLM agrees
