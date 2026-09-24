@@ -188,6 +188,7 @@ resources:
       # No network volume: it would pin the Pod to one datacenter, and single-site stock is
       # too thin. The Pod volume survives restarts; replacing the Pod re-downloads the weights.
       countryCode: ${countryCode}
+      minCudaVersion: "13.0"    # the vLLM v0.30.0 image is built on CUDA 13.0; skip hosts with older drivers
       volumeInGb: ${volumeSizeGb}
       volumeMountPath: /workspace
       containerDiskInGb: 20
