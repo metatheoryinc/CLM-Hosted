@@ -140,7 +140,7 @@ class Router:
 
     def __init__(self, name: str, instructions: str, sink=None, mode: str = "shadow",
                  threshold: float = 0.8, client=None, model: str | None = None,
-                 timeout: float = 2.0):
+                 timeout: float = 2.0, calibrate: str | None = "content-free"):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         if not 0 < threshold <= 1:
@@ -149,6 +149,7 @@ class Router:
         self.name, self.instructions, self.sink, self.mode, self.threshold = name, instructions, sink, mode, threshold
         self.client = client or CLMClient(timeout=timeout)
         self.model = model or os.environ.get("CLM_MODEL") or self.client.model
+        self.calibrate = calibrate            # "content-free": remove each option's lean (None: off)
         self._pending: set[threading.Thread] = set()
         self._pending_lock = threading.Lock()
 
@@ -162,9 +163,13 @@ class Router:
     def _ask(self, state: Any, questions: dict) -> dict:
         t0 = time.perf_counter()
         try:
-            j, r = self.client._post("/v1/systemone", {"state": state, "questions": questions, "model": self.model})
+            body = {"state": state, "questions": questions, "model": self.model}
+            if self.calibrate:
+                body["calibrate"] = self.calibrate
+            j, r = self.client._post("/v1/systemone", body)
             a = j["answers"][QID]
-            return {"model": j.get("model", self.model), "choice": a["choice"],
+            return {"model": j.get("model", self.model), "calibrate": j.get("calibrate", "none"),
+                    "choice": a["choice"],
                     "probability": float(a["probabilities"][a["choice"]]), "confidence": float(a["confidence"]),
                     "probabilities": a["probabilities"], "latency_ms": round((time.perf_counter() - t0) * 1000, 1),
                     "server_ms": float(r.headers.get("X-CLM-Latency-Ms") or 0) or None}

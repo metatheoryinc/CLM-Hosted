@@ -70,7 +70,8 @@ BASELINE = {"PostToolUse": ("allow", 1), "PostToolUseFailure": ("allow", 1),
             "PermissionRequest": ("review", 2), "PermissionDenied": ("block", 3)}
 DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, "timeout": 1.5,
             "raw_log": False, "raw_log_path": "~/.config/clm/claude-code-events.jsonl",
-            "subagent_mode": "shadow", "subagent_threshold": 0.9, "subagent_timeout": 1.5}
+            "subagent_mode": "shadow", "subagent_threshold": 0.9, "subagent_timeout": 1.5,
+            "calibrate": "content-free"}
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 MAX_FIELD, MAX_INPUT = 800, 3000
 
@@ -163,11 +164,13 @@ def classify(cfg: dict, state: dict, timeout: float, instructions: str = INSTRUC
              options: dict = OPTIONS) -> dict:
     t0 = time.perf_counter()
     try:
-        j = post(cfg, "/v1/systemone", {"state": state, "model": cfg.get("model", "clm-latest"),
-                                        "questions": {QID: {"type": "choice", "instructions": instructions,
-                                                            "criteria": options}}}, timeout)
+        body = {"state": state, "model": cfg.get("model", "clm-latest"),
+                "questions": {QID: {"type": "choice", "instructions": instructions, "criteria": options}}}
+        if cfg.get("calibrate") not in (None, False, "none"):
+            body["calibrate"] = cfg["calibrate"]
+        j = post(cfg, "/v1/systemone", body, timeout)
         a = j["answers"][QID]
-        return {"model": j.get("model"), "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
+        return {"model": j.get("model"), "calibrate": j.get("calibrate", "none"), "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
                 "confidence": float(a["confidence"]), "probabilities": a["probabilities"],
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
     except Exception as e:  # noqa: BLE001

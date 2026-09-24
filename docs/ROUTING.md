@@ -133,6 +133,10 @@ them. What it responds to:
   worker's result. "The researcher finished" says less than what it found.
 * **Keep the state's fields in a fixed order.** Reordering the same fields can
   change the answer; build the state the same way every time.
+* **Calibration is on by default** (`Router(..., calibrate="content-free")`). Without it,
+  one option's wording can win for every state; in our tests the zero-shot argmax went
+  to the same option 15 times out of 15 until each option's content-free lean was
+  subtracted. Keep it on unless the report says otherwise.
 * **Keep hard rules in code**: action and spending limits, and anything needing
   approval (publishing, sending, deleting), should not depend on any classifier.
 

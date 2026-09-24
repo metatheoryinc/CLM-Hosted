@@ -242,3 +242,12 @@ def test_baseline_events_fill_in_the_baseline_by_rank():
               {"event": "baseline", "id": "other", "label": "block", "rank": 3}]
     [m] = D.merge(events)
     assert m["baseline"] == {"route": {"label": "review"}}     # the prompt outranks the later "it ran"
+
+
+def test_router_requests_calibration_unless_disabled():
+    r, _ = router(mode="active")
+    r.route("s", WORKERS, baseline="writer")
+    assert r.client.calls[-1][1]["calibrate"] == "content-free"
+    r2, _ = router(mode="active", calibrate=None)
+    r2.route("s", WORKERS, baseline="writer")
+    assert "calibrate" not in r2.client.calls[-1][1]

@@ -20,7 +20,7 @@ from typing import Any
 from .cache import CacheDisabled, VectorArena
 from .embedder import Embedder
 from .heads import HIDDEN, HeadPair, default_checkpoint, default_device
-from .schema import answer_from_logits, build_pairs
+from .schema import answer_from_logits, build_pairs, state_text
 
 DEFAULT_MODEL = "clm-latest"
 VERIFY_MODEL = "deepswe"          # served by /v1/verify unless the request names another head
@@ -28,6 +28,19 @@ RAW_MODEL = "clm-raw"
 RAW_SCALE = 100.0
 RAW_SHARE = 0.125      # of the arena, for the raw ablation's wider vectors
 RELEASE = "2026-09-19"
+# Content-free calibration (Zhao et al., 2021): each option's score for a question asked about
+# nothing is that option's lean, whatever the state; subtracting it leaves what the state says.
+CALIBRATIONS = ("none", "content-free")
+CONTENT_FREE_STATES = ("N/A", "")
+
+
+def calibration_of(value: Any) -> str:
+    """Request value -> "none" or "content-free" (true / "content-free"); ValueError otherwise."""
+    if value in (None, False, "none"):
+        return "none"
+    if value is True or value == "content-free":
+        return "content-free"
+    raise ValueError(f"calibrate must be one of {CALIBRATIONS} (or true / false), got {value!r}")
 
 
 class ModelNotFound(KeyError):
@@ -109,8 +122,14 @@ class Engine:
 
     # ------------------------------------------------------------------ inference
     def answer(self, state: Any, questions: dict[str, dict], model: str = DEFAULT_MODEL,
-               temperature: float = 1.0) -> dict:
-        """-> {"model", "answers": {id: Answer}, "usage"}; raises ValueError on bad questions."""
+               temperature: float = 1.0, calibrate: Any = None) -> dict:
+        """-> {"model", "answers": {id: Answer}, "usage"}; raises ValueError on bad questions.
+
+        ``calibrate="content-free"`` subtracts, per question, each option's score for the same
+        question asked about an empty state (the option's lean, averaged over
+        ``CONTENT_FREE_STATES``) before the softmax.
+        """
+        calibration = calibration_of(calibrate)
         if not questions:
             raise ValueError("questions must not be empty")
         if not (0 < temperature <= 100):
@@ -123,6 +142,11 @@ class Engine:
             raise ModelNotFound(f"unknown model {model!r}; available: {[m['name'] for m in self.models()]}")
         pairs = build_pairs(state, questions)          # ValueError on malformed questions
         states = [p[0] for p in pairs.values()]
+        n_real = len(states)
+        if calibration == "content-free":
+            # one row per (question, content-free state), after the real states; cached like any state
+            states += [state_text(cf, questions[qid].get("instructions")) or "N/A"
+                       for qid in pairs for cf in CONTENT_FREE_STATES]
         cands = [t for p in pairs.values() for t in p[2]]
         tokens: list[int] = []
         if head is None:
@@ -135,16 +159,20 @@ class Engine:
             zq = self._cached(f"{ns}/state", dim, states, tokens, head.project_states)
             za = self._cached(f"{ns}/action", dim, cands, tokens, head.project_actions)
             scale = head.scale
-        answers, k = {}, 0
+        answers, k, m = {}, 0, len(CONTENT_FREE_STATES)
         for i, (qid, (_, keys, texts)) in enumerate(pairs.items()):
-            cos = za[k:k + len(texts)] @ zq[i]
+            block = za[k:k + len(texts)]
+            cos = block @ zq[i]
+            if calibration == "content-free":
+                base = n_real + i * m
+                cos = cos - sum(block @ zq[base + j] for j in range(m)) / m
             k += len(texts)
             answers[qid] = answer_from_logits(questions[qid], keys, (scale * cos / temperature).tolist())
-        return {"model": model, "answers": answers,
+        return {"model": model, "calibrate": calibration, "answers": answers,
                 "usage": {"billing_units": len(questions), "input_tokens": sum(tokens), "output_tokens": 0}}
 
     def rank(self, state: Any, candidates: list[str], instructions: str | None = None,
-             model: str = DEFAULT_MODEL, temperature: float = 1.0) -> list[dict]:
+             model: str = DEFAULT_MODEL, temperature: float = 1.0, calibrate: Any = None) -> list[dict]:
         """Rank free-form candidate strings against a state (best first).
 
         ``state`` is the context and ``instructions`` the question; the state head sees
@@ -152,7 +180,7 @@ class Engine:
         """
         q = {"type": "choice", "instructions": instructions,
              "criteria": {str(i): c for i, c in enumerate(candidates)}}
-        a = self.answer(state, {"rank": q}, model, temperature)["answers"]["rank"]
+        a = self.answer(state, {"rank": q}, model, temperature, calibrate)["answers"]["rank"]
         order = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])
         return [{"rank": r + 1, "candidate": candidates[int(i)], "prob": p} for r, (i, p) in enumerate(order)]
 

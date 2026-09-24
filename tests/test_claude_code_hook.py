@@ -322,3 +322,10 @@ def test_active_times_out_to_the_original_model(run):
 def test_shadow_subagent_mode_never_rewrites(run):
     p, _, _ = run(agent_call(tid="toolu_d9"), probs=SONNET)
     assert p.stdout == ""
+
+
+@pytest.mark.parametrize("extra, sent", [({}, "content-free"), ({"calibrate": "none"}, None)])
+def test_calibration_is_requested_by_default(run, extra, sent):
+    _, _, clm = run(pre(tid=f"toolu_cal_{sent}"), extra=extra)
+    clm.wait(1)
+    assert clm.systemone[0][1].get("calibrate") == sent

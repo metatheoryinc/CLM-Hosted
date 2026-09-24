@@ -166,13 +166,16 @@ class CLMClient:
         return r.json(), r
 
     def system_one(self, state: Any, questions: dict[str, Question], model: str | None = None,
-                   temperature: float | None = None) -> SystemOneResponse:
+                   temperature: float | None = None, calibrate: str | bool | None = None) -> SystemOneResponse:
         """One request: every question answered against one state.  ``temperature``
-        (server default 1.0) flattens (>1) or sharpens (<1) the distributions."""
+        (server default 1.0) flattens (>1) or sharpens (<1) the distributions;
+        ``calibrate="content-free"`` removes each option's lean (see the API reference)."""
         body: dict[str, Any] = {"state": state, "model": model or self.model,
                                 "questions": {k: question_to_dict(q) for k, q in questions.items()}}
         if temperature is not None:
             body["temperature"] = temperature
+        if calibrate is not None:
+            body["calibrate"] = calibrate
         j, r = self._post("/v1/systemone", body)
         u = j.get("usage", {}) or {}
         return SystemOneResponse(model=j["model"], answers={k: parse_answer(a) for k, a in j["answers"].items()},
@@ -181,12 +184,14 @@ class CLMClient:
                                  latency_ms=float(r.headers["X-CLM-Latency-Ms"]) if "X-CLM-Latency-Ms" in r.headers else None)
 
     def rank(self, context: Any, question: str | None, answers: list[str], model: str | None = None,
-             temperature: float | None = None) -> list[dict]:
+             temperature: float | None = None, calibrate: str | bool | None = None) -> list[dict]:
         """Rank ``answers`` for ``context`` + ``question``; -> [{rank, candidate, prob}] best first."""
         body: dict[str, Any] = {"context": context, "question": question, "answers": list(answers),
                                 "model": model or self.model}
         if temperature is not None:
             body["temperature"] = temperature
+        if calibrate is not None:
+            body["calibrate"] = calibrate
         j, _ = self._post("/v1/rank", body)
         return j["ranked"]
 

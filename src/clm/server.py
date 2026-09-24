@@ -4,7 +4,8 @@
     export CLM_API_KEY=...      # optional; then requests need "Authorization: Bearer <key>"
 
     POST /v1/systemone   {"state": ..., "model": "clm-latest", "questions": {id: Question},
-                          "temperature": 1.0}          -> {"model", "answers": {id: Answer}, "usage"}
+                          "temperature": 1.0, "calibrate": "content-free"}
+                                                       -> {"model", "calibrate", "answers": {id: Answer}, "usage"}
     POST /v1/rank        {"context": ..., "question": ..., "answers": [...]}
                                                        -> {"model", "ranked": [{rank, candidate, prob}]}
     POST /v1/verify      {"trajectories": [{"id", "steps": [{"state", "action"}]}], "model": "deepswe",
@@ -111,7 +112,8 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
         t0 = time.perf_counter()
         try:
             out = await asyncio.get_running_loop().run_in_executor(
-                None, engine.answer, body["state"], body["questions"], body.get("model") or DEFAULT_MODEL, temperature)
+                None, engine.answer, body["state"], body["questions"], body.get("model") or DEFAULT_MODEL, temperature,
+                body.get("calibrate"))
         except ModelNotFound as e:
             raise HTTPException(422, str(e.args[0])) from e
         except (ValueError, KeyError, TypeError, AttributeError) as e:
@@ -144,7 +146,7 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
         try:
             ranked = await asyncio.get_running_loop().run_in_executor(
                 None, lambda: engine.rank(body.get("context") or "", body["answers"], body.get("question"),
-                                          body.get("model") or DEFAULT_MODEL, temperature))
+                                          body.get("model") or DEFAULT_MODEL, temperature, body.get("calibrate")))
         except ModelNotFound as e:
             raise HTTPException(422, str(e.args[0])) from e
         except (ValueError, KeyError, TypeError, AttributeError) as e:
