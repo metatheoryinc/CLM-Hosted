@@ -105,7 +105,10 @@ curl https://clm.metatheory.dev/v1/systemone -H "Authorization: Bearer <agent ke
 ```
 
 Agents using `CLMClient` set `CLM_BASE_URL=https://clm.metatheory.dev` and
-`CLM_API_KEY=<agent key>`. The gateway logs each request's agent, path,
+`CLM_API_KEY=<agent key>`. `POST /v1/verify` (the DeepSWE verifier) encodes up to
+8K tokens per step for the final 12 steps of each trajectory; Cloudflare ends
+any request whose response takes over 100 s, so send large best-of-N sets in
+several calls. The gateway logs each request's agent, path,
 status and latency to Workers Logs.
 
 ## Agents

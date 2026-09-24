@@ -346,7 +346,9 @@ The code in this repository is released under the [Apache 2.0 License](LICENSE).
 │   ├── __init__.py              #   from clm import CLMClient, Noul, Choice, Score, Engine
 │   ├── client.py                #   CLMClient + question / answer types (no torch needed)
 │   ├── schema.py                #   question -> (state text, candidate texts); logits -> Answer
-│   ├── engine.py                #   Engine.answer(...) / Engine.rank(...): the inference engine
+│   ├── engine.py                #   Engine.answer / .rank / .verify: the inference engine
+│   ├── verify.py                #   POST /v1/verify: best-of-N trajectories with a process head
+│   ├── recipe.py                #   the DeepSWE token recipe, shared with train/
 │   ├── heads.py                 #   head architecture, checkpoint load / hot-reload / download
 │   ├── embedder.py              #   /v1/embeddings client + LRU cache of normalised embeddings
 │   ├── cache.py                 #   the reserved vector arena behind --action-cache
@@ -404,6 +406,34 @@ returns `{"model", "ranked": [{"rank", "candidate", "prob"}, ...]}`, best first.
 state head sees `context + question`, the action head sees each answer verbatim.
 `CLMClient.rank(context, question, answers)` and `Engine.rank(context, answers, question)`
 are the client and in-process forms.
+
+### `POST /v1/verify`
+
+Best-of-N over agent trajectories with a process head: `evaluation/bon_eval.py`
+as a service. Served when the DeepSWE head is loaded (`--model deepswe=PATH`;
+the container does this by default).
+
+```json
+{"model": "deepswe", "window": 12,
+ "trajectories": [{"id": "a", "steps": [{"state": [{"role": "user", "content": "..."}, ...],
+                                          "action": "..."}, ...]}, ...]}
+```
+
+| field | |
+| --- | --- |
+| `trajectories` | 1–32, each `{"id"?, "steps": [{"state", "action"}]}`; ids default to the list index |
+| `state` | the chat messages the agent acted on (`{role, content}`), or plain text |
+| `action` | the text the agent produced at that step |
+| `window` | optional, 1–64, default 12 (the released DeepSWE aggregation) |
+
+Returns `{"model", "window", "best", "trajectories": [{"id", "score", "steps",
+"step_scores"}], "usage"}`. A step's score is the cosine of the projected state
+and action; a trajectory's `score` is the mean over its final `window` steps
+(only those are embedded) and `best` is the highest (ties: the first listed).
+Steps are tokenized with the DeepSWE training recipe (`clm.recipe`: chat
+template, last 8191 tokens of the state, first 8191 of the action), so the
+encoder must run with `--max-model-len 8192`. `CLMClient.verify(trajectories)`
+is the client form.
 
 ### `GET /`
 
