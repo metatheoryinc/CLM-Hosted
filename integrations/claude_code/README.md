@@ -66,8 +66,29 @@ only sees the task description, prompt and subagent type, not the model Claude a
 
 Subagents without a `model` inherit the main conversation's model, so a search task can
 run on the most expensive tier; the report shows how often CLM would have picked a cheaper
-one. There is no active mode for this yet: a wrong downgrade costs quality, so it needs
-labels (was the cheaper tier good enough?) before it changes anything.
+one.
+
+### Active: downgrade only
+
+With `"subagent_mode": "active"` in the config (independent of `"mode"`, which governs the
+tool-call gate), a subagent launch waits for CLM (`subagent_timeout`, default 1.5 s) and,
+when CLM's pick reaches `subagent_threshold` (default 0.9) and is cheaper than what would
+otherwise run, rewrites the call's `model`. What would otherwise run is taken to be the
+top tier (subagents inherit the main model), or `CLAUDE_CODE_SUBAGENT_MODEL`'s tier when
+that is set. It never:
+
+* upgrades, so a pick of `opus` changes nothing;
+* overrides a model Claude chose for the call;
+* overrides a custom agent whose definition (`.claude/agents/**/*.md`, in the project or
+  `~/.claude`) sets `model:`;
+* touches plugin agents (`plugin:agent`), whose definitions it cannot see;
+* acts on an error or timeout.
+
+Each record says what it did and why (`meta.applied_model`, `meta.why`), and the tier
+that actually ran is logged when the subagent finishes. A wrong downgrade costs quality,
+not safety: watch for subagents that fail or come back thin, and raise the threshold or
+set `"subagent_mode": "shadow"` if they do. CLM's confidence here is not yet trustworthy
+(it has picked `sonnet` at 0.99 for tasks the `haiku` option describes).
 
 `"raw_log": true` in the config also appends the raw Agent, SubagentStart and
 SubagentStop payloads to `~/.config/clm/claude-code-events.jsonl` (local only, mode 600),

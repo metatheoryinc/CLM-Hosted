@@ -17,9 +17,12 @@ PostToolUse and PostToolUseFailure (see .claude/settings.json); off unless confi
   prompt and a ``block`` pick denies the call. It never approves anything: CLM can only
   make Claude Code stricter. Any error or timeout leaves the call to Claude Code.
 
-Subagents (the ``Agent`` tool) get a second, shadow-only question: which model tier the
-task needs, logged as ``routing/claude-code-subagents`` with the model Claude asked for, if
-any, as the baseline. With ``"raw_log": true`` the raw Agent / SubagentStart / SubagentStop
+Subagents (the ``Agent`` tool) get a second question: which model tier the task needs,
+logged as ``routing/claude-code-subagents`` with the model Claude asked for, if any, as the
+baseline. With ``"subagent_mode": "active"`` a confident pick (``subagent_threshold``,
+default 0.9) that is cheaper than what would otherwise run rewrites the call's ``model``.
+Downgrade only; never when Claude set a model, the agent's definition sets one, or the
+agent comes from a plugin; any error or timeout leaves the call alone. With ``"raw_log": true`` the raw Agent / SubagentStart / SubagentStop
 payloads are also appended to ``~/.config/clm/claude-code-events.jsonl`` (local only), to
 see what Claude Code reports about a subagent before relying on it.
 
@@ -66,7 +69,9 @@ TIERS = (("haiku", "haiku"), ("sonnet", "sonnet"), ("opus", "opus"), ("fable", "
 BASELINE = {"PostToolUse": ("allow", 1), "PostToolUseFailure": ("allow", 1),
             "PermissionRequest": ("review", 2), "PermissionDenied": ("block", 3)}
 DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, "timeout": 1.5,
-            "raw_log": False, "raw_log_path": "~/.config/clm/claude-code-events.jsonl"}
+            "raw_log": False, "raw_log_path": "~/.config/clm/claude-code-events.jsonl",
+            "subagent_mode": "shadow", "subagent_threshold": 0.9, "subagent_timeout": 1.5}
+TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 MAX_FIELD, MAX_INPUT = 800, 3000
 
 SECRET_PATTERNS = [
@@ -193,6 +198,47 @@ def subagent_record(event: dict, state: dict, clm: dict) -> dict:
     return rec
 
 
+def agent_definition_model(agent_type: str, cwd: str) -> str | None:
+    """The ``model:`` in a custom agent's definition (``.claude/agents/**/*.md``), "" if it sets none,
+    None if no definition is found (a built-in agent)."""
+    import pathlib
+    for root in (pathlib.Path(cwd or ".") / ".claude" / "agents", pathlib.Path.home() / ".claude" / "agents"):
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*.md"):
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            front = text.split("---", 2)[1] if text.startswith("---") and text.count("---") >= 2 else ""
+            fields = dict(line.split(":", 1) for line in front.splitlines() if ":" in line)
+            fields = {k.strip(): v.strip().strip("\"'") for k, v in fields.items()}
+            if fields.get("name", f.stem) == agent_type:
+                return fields.get("model", "")
+    return None
+
+
+def pick_downgrade(event: dict, clm: dict, cfg: dict) -> tuple[str | None, str]:
+    """Active subagent mode: -> (model to set, why). Only ever a cheaper tier than what would run."""
+    ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
+    agent_type = str(ti.get("subagent_type") or "general-purpose")
+    if ti.get("model"):
+        return None, "Claude set the model"
+    if ":" in agent_type:
+        return None, "plugin agent"
+    defined = agent_definition_model(agent_type, event.get("cwd", ""))
+    if defined:
+        return None, "the agent definition sets the model"
+    if "error" in clm:
+        return None, "CLM error"
+    if clm["probability"] < float(cfg["subagent_threshold"]):
+        return None, "below the threshold"
+    current = tier_of(os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")) or "opus"   # inherited: assume the top tier
+    if TIER_RANK[clm["choice"]] >= TIER_RANK[current]:
+        return None, "not cheaper"
+    return clm["choice"], f"{current} -> {clm['choice']}"
+
+
 def tier_of(model: str | None) -> str | None:
     m = (model or "").lower()
     return next((tier for name, tier in TIERS if name in m), None)
@@ -229,8 +275,12 @@ def background(payload: dict) -> None:
 def run_background(payload: dict) -> None:
     cfg, event = load_config(), payload["event"]
     if payload["kind"] == "subagent":
-        clm = classify(cfg, payload["state"], 10, SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
-        post(cfg, "/v1/decisions", subagent_record(event, payload["state"], clm), 10)
+        clm = payload.get("clm") or classify(cfg, payload["state"], 10, SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
+        rec = subagent_record(event, payload["state"], clm)
+        if "applied" in payload:
+            rec.update(mode="active", threshold=cfg["subagent_threshold"], acted="clm" if payload["applied"] else "baseline")
+            rec["meta"].update(applied_model=payload["applied"], why=payload["why"])
+        post(cfg, "/v1/decisions", rec, 10)
     elif payload["kind"] == "record":
         clm = payload.get("clm") or classify(cfg, payload["state"], timeout=10)
         post(cfg, "/v1/decisions", record(event, payload["state"], clm, cfg, payload.get("acted", "baseline")), 10)
@@ -305,18 +355,29 @@ def main() -> int:
         if is_agent and cfg.get("raw_log"):
             raw_log(event, cfg["raw_log_path"])
         if name == "PreToolUse":
-            state = state_of(event)
+            state, out = state_of(event), None
             if cfg["mode"] == "active":
                 clm = classify(cfg, state, timeout=float(cfg["timeout"]))
                 out = decide(clm, cfg)
                 background({"kind": "record", "event": event, "state": state, "clm": clm,
                             "acted": "clm" if out else "baseline"})
-                if out:
-                    print(json.dumps(out))
             else:
                 background({"kind": "record", "event": event, "state": state})
             if is_agent:
-                background({"kind": "subagent", "event": event, "state": subagent_state(event)})
+                sub = subagent_state(event)
+                denied = out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
+                if cfg.get("subagent_mode") == "active" and not denied:
+                    clm_s = classify(cfg, sub, float(cfg["subagent_timeout"]), SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
+                    model, why = pick_downgrade(event, clm_s, cfg)
+                    background({"kind": "subagent", "event": event, "state": sub, "clm": clm_s,
+                                "applied": model, "why": why})
+                    if model:
+                        out = out or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+                        out["hookSpecificOutput"]["updatedInput"] = {**event["tool_input"], "model": model}
+                else:
+                    background({"kind": "subagent", "event": event, "state": sub})
+            if out:
+                print(json.dumps(out))
         elif name in BASELINE:
             background({"kind": "baseline", "event": event})
             if is_agent and name in ("PostToolUse", "PostToolUseFailure"):

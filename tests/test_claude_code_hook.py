@@ -30,7 +30,9 @@ class FakeCLM:
                 if self.path == "/v1/systemone":
                     outer.systemone.append((self.headers["Authorization"], body))
                     time.sleep(outer.delay)
-                    p = outer.probs or {"allow": 0.9, "review": 0.07, "block": 0.03}
+                    keys = list(body["questions"]["route"]["criteria"])
+                    p = outer.probs if outer.probs and set(outer.probs) == set(keys) else \
+                        {k: (0.9 if i == 0 else 0.1 / (len(keys) - 1)) for i, k in enumerate(keys)}
                     out = {"model": "clm-latest", "answers": {"route": {
                         "type": "choice", "choice": max(p, key=p.get), "confidence": 0.5, "probabilities": p}}}
                 else:
@@ -58,7 +60,7 @@ class FakeCLM:
 def run(tmp_path):
     servers = []
 
-    def _run(event, mode="shadow", probs=None, delay=0.0, threshold=0.9, config=True, extra=None):
+    def _run(event, mode="shadow", probs=None, delay=0.0, threshold=0.9, config=True, extra=None, env_extra=None):
         clm = FakeCLM(probs, delay)
         servers.append(clm)
         cfg = tmp_path / "cfg.json"
@@ -67,6 +69,9 @@ def run(tmp_path):
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLM_")}
         env["CLM_HOOK_CONFIG"] = str(cfg)
         env["CLM_HOOK_STATE_DIR"] = str(tmp_path / "claims")
+        env.pop("CLAUDE_CODE_SUBAGENT_MODEL", None)
+        env["HOME"] = str(tmp_path / "home")                 # no real ~/.claude/agents
+        env.update(env_extra or {})
         t0 = time.perf_counter()
         p = subprocess.run([sys.executable, HOOK], input=json.dumps(event), capture_output=True, text=True, env=env,
                            timeout=30)
@@ -253,3 +258,67 @@ def test_agent_results_report_the_tier_that_ran_and_the_cost(run):
                                          ("claude-sonnet-5", "sonnet"), ("some-other-model", None), (None, None)])
 def test_tier_of(model, tier):
     assert hook.tier_of(model) == tier
+
+
+# ── subagents, active ────────────────────────────────────────────────────────
+
+ACTIVE = {"subagent_mode": "active"}
+SONNET = {"haiku": 0.02, "sonnet": 0.95, "opus": 0.03}
+
+
+def test_active_downgrades_an_inherited_model(run):
+    p, _, clm = run(agent_call(tid="toolu_d1"), probs=SONNET, extra=ACTIVE)
+    out = json.loads(p.stdout)["hookSpecificOutput"]
+    assert out["updatedInput"] == {**agent_call()["tool_input"], "model": "sonnet"}   # full input, model set
+    assert "permissionDecision" not in out                                          # permissions untouched
+    sub = next(r for r in clm.wait(2) if r["workflow"] == "routing/claude-code-subagents")
+    assert (sub["acted"], sub["mode"], sub["meta"]["applied_model"], sub["meta"]["why"]) == \
+        ("clm", "active", "sonnet", "opus -> sonnet")
+
+
+@pytest.mark.parametrize("event, probs, env, why", [
+    (agent_call(model="opus", tid="toolu_d2"), SONNET, {}, "Claude set the model"),
+    (dict(agent_call(tid="toolu_d3"), tool_input={**agent_call()["tool_input"], "subagent_type": "superpowers:code-reviewer"}),
+     SONNET, {}, "plugin agent"),
+    (agent_call(tid="toolu_d4"), {"haiku": 0.1, "sonnet": 0.8, "opus": 0.1}, {}, "below the threshold"),
+    (agent_call(tid="toolu_d5"), {"haiku": 0.02, "sonnet": 0.03, "opus": 0.95}, {}, "not cheaper"),     # never upgrades
+    (agent_call(tid="toolu_d6"), SONNET, {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}, "not cheaper"),
+])
+def test_active_leaves_the_call_alone(run, event, probs, env, why):
+    p, _, clm = run(event, probs=probs, extra=ACTIVE, env_extra=env)
+    assert p.stdout == ""
+    sub = next(r for r in clm.wait(2) if r["workflow"] == "routing/claude-code-subagents")
+    assert sub["meta"]["why"] == why and sub["meta"]["applied_model"] is None and sub["acted"] == "baseline"
+
+
+def test_active_respects_the_env_default_tier(run):
+    p, _, _ = run(agent_call(tid="toolu_d7"), probs={"haiku": 0.96, "sonnet": 0.02, "opus": 0.02}, extra=ACTIVE,
+                  env_extra={"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
+    assert json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "haiku"
+
+
+@pytest.mark.parametrize("front, rewritten", [("model: opus\n", False), ("", True)])
+def test_active_respects_agent_definitions(run, tmp_path, front, rewritten):
+    d = tmp_path / "proj" / ".claude" / "agents"
+    d.mkdir(parents=True)
+    (d / "researcher.md").write_text(f"---\nname: researcher\ndescription: Researches things\n{front}---\nBody\n")
+    e = agent_call(tid=f"toolu_def{int(rewritten)}")
+    e = dict(e, cwd=str(tmp_path / "proj"), tool_input={**e["tool_input"], "subagent_type": "researcher"})
+    p, _, clm = run(e, probs=SONNET, extra=ACTIVE)
+    assert (p.stdout != "") == rewritten
+    if not rewritten:
+        sub = next(r for r in clm.wait(2) if r["workflow"] == "routing/claude-code-subagents")
+        assert sub["meta"]["why"] == "the agent definition sets the model"
+
+
+def test_active_times_out_to_the_original_model(run):
+    p, took, clm = run(agent_call(tid="toolu_d8"), probs=SONNET, delay=3,
+                       extra={**ACTIVE, "subagent_timeout": 0.5})
+    assert p.stdout == "" and took < 2.5
+    sub = next(r for r in clm.wait(2, timeout=15) if r["workflow"] == "routing/claude-code-subagents")
+    assert sub["meta"]["why"] == "CLM error"
+
+
+def test_shadow_subagent_mode_never_rewrites(run):
+    p, _, _ = run(agent_call(tid="toolu_d9"), probs=SONNET)
+    assert p.stdout == ""
