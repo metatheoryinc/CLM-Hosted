@@ -76,6 +76,9 @@ def verify(engine, recipe, head, body: dict) -> dict:
         k += len(steps)
         out.append({"id": tid, "score": sum(step_scores) / len(step_scores), "steps": steps[0]["n"],
                     "step_scores": step_scores})
-    best = max(range(len(out)), key=lambda i: out[i]["score"])     # ties: the first listed
+    # ties (within float noise: the same steps can score a hair apart at different batch
+    # positions) go to the first listed
+    top = max(t["score"] for t in out)
+    best = next(i for i, t in enumerate(out) if t["score"] >= top - 1e-6)
     return {"window": window, "best": out[best]["id"], "trajectories": out,
             "usage": {"input_tokens": t1 + t2, "encoded_steps": len(flat)}}
