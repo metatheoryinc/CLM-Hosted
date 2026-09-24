@@ -1,0 +1,226 @@
+# CLM, the whole stack: one always-on RunPod GPU Pod running ghcr.io/metatheoryinc/clm-hosted
+# (weights on a network volume), reachable only through a Cloudflare Tunnel, with a Worker
+# gateway on the public hostname for per-agent keys and rate limits. See infra/README.md.
+#
+#   agent ──► https://<hostname> ── Worker (agent key → upstream key) ── Tunnel ──► Pod :8700
+name: clm-hosted
+runtime: yaml
+description: CLM System One API on RunPod behind Cloudflare
+
+config:
+  runpodApiKey:
+    type: string
+    secret: true
+    # RunPod → Settings → API Keys
+  cloudflareApiToken:
+    type: string
+    secret: true
+    # permissions in infra/README.md
+  imageTag:
+    type: string
+    default: latest
+    # pin to a commit SHA pushed by .github/workflows/image.yml; changing it updates the Pod in place
+  registryAuthId:
+    type: string
+    # the RunPod container registry credential that can pull ghcr.io/metatheoryinc/*
+  dataCenterId:
+    type: string
+    default: US-TX-3
+    # the Pod and its volume must share a datacenter; changing it replaces both
+  gpuTypes:
+    type: array
+    items:
+      type: string
+    default: ["NVIDIA L4", "NVIDIA RTX A5000", "NVIDIA GeForce RTX 4090"]
+    # 24 GB cards, tried in order
+  volumeSizeGb:
+    type: integer
+    default: 40
+  clmApiKey:
+    type: string
+    secret: true
+    # upstream key between the gateway and the Pod; agents never see it
+  cloudflareAccountId:
+    type: string
+  cloudflareZoneId:
+    type: string
+  hostname:
+    type: string
+    default: clm.metatheory.dev
+    # public hostname in the zone
+  agentKeys:
+    type: string
+    secret: true
+    # JSON {"<agent name>": "<key>"}; one key per agent, revoked by removing it
+  rateLimitPerMinute:
+    type: integer
+    default: 600
+    # per agent
+  rateLimitNamespaceId:
+    type: string
+    default: "7001"
+    # any integer, unique among the account's Worker rate limits
+
+resources:
+  # The new provider (github.com/runpod/pulumi-runpod) is not on PyPI; the plugin comes
+  # from its GitHub releases.
+  runpod:
+    type: pulumi:providers:runpod
+    properties:
+      apiKey: ${runpodApiKey}
+    options:
+      version: 0.1.5
+      pluginDownloadURL: github://api.github.com/runpod/pulumi-runpod
+
+  weights:
+    type: runpod:NetworkVolume
+    properties:
+      name: clm-weights-${pulumi.stack}
+      size: ${volumeSizeGb}
+      dataCenterId: ${dataCenterId}
+    options:
+      provider: ${runpod}
+      protect: true   # holds the ~16 GB of downloaded weights
+
+  cloudflare:
+    type: pulumi:providers:cloudflare
+    properties:
+      apiToken: ${cloudflareApiToken}
+    options:
+      version: 6.21.0
+
+  # ── Cloudflare: tunnel to the Pod ─────────────────────────────────────────
+
+  tunnel:
+    type: cloudflare:ZeroTrustTunnelCloudflared
+    properties:
+      accountId: ${cloudflareAccountId}
+      name: clm-${pulumi.stack}
+      configSrc: cloudflare     # ingress managed here, not in a file on the Pod
+    options:
+      provider: ${cloudflare}
+
+  tunnelConfig:
+    type: cloudflare:ZeroTrustTunnelCloudflaredConfig
+    properties:
+      accountId: ${cloudflareAccountId}
+      tunnelId: ${tunnel.id}
+      config:
+        ingresses:
+          - hostname: ${hostname}
+            service: http://localhost:8700
+          - service: http_status:404
+    options:
+      provider: ${cloudflare}
+
+  dns:
+    type: cloudflare:DnsRecord
+    properties:
+      zoneId: ${cloudflareZoneId}
+      name: ${hostname}
+      type: CNAME
+      content: ${tunnel.id}.cfargotunnel.com
+      proxied: true
+      ttl: 1
+      comment: CLM tunnel (${pulumi.stack}), managed by Pulumi
+    options:
+      provider: ${cloudflare}
+
+  # ── Cloudflare: gateway Worker on the public hostname ─────────────────────
+
+  gateway:
+    type: cloudflare:WorkersScript
+    properties:
+      accountId: ${cloudflareAccountId}
+      scriptName: clm-gateway-${pulumi.stack}
+      mainModule: worker.js
+      content:
+        fn::readFile: ./gateway/worker.js
+      compatibilityDate: "2026-09-01"
+      observability:
+        enabled: true
+      bindings:
+        - name: AGENT_KEYS
+          type: secret_text
+          text: ${agentKeys}
+        - name: UPSTREAM_KEY
+          type: secret_text
+          text: ${clmApiKey}
+        - name: LIMITER
+          type: ratelimit
+          namespaceId: ${rateLimitNamespaceId}
+          simple:
+            limit: ${rateLimitPerMinute}
+            period: 60
+    options:
+      provider: ${cloudflare}
+
+  gatewayRoute:
+    type: cloudflare:WorkersRoute
+    properties:
+      zoneId: ${cloudflareZoneId}
+      pattern: ${hostname}/*
+      script: ${gateway.scriptName}
+    options:
+      provider: ${cloudflare}
+
+  # ── RunPod ────────────────────────────────────────────────────────────────
+
+  apiKeySecret:
+    type: runpod:Secret
+    properties:
+      name: clm_api_key_${pulumi.stack}
+      value: ${clmApiKey}
+      description: Bearer key for clm-serve (${pulumi.stack})
+    options:
+      provider: ${runpod}
+
+  tunnelTokenSecret:
+    type: runpod:Secret
+    properties:
+      name: clm_tunnel_token_${pulumi.stack}
+      value: ${tunnelToken}
+      description: cloudflared token for the clm-${pulumi.stack} tunnel
+    options:
+      provider: ${runpod}
+
+  pod:
+    type: runpod:Pod
+    properties:
+      name: clm-${pulumi.stack}
+      imageName: ghcr.io/metatheoryinc/clm-hosted:${imageTag}
+      containerRegistryAuthId: ${registryAuthId}
+      cloudType: SECURE         # network volumes are Secure Cloud only
+      computeType: GPU
+      gpuCount: 1
+      gpuTypeIdList: ${gpuTypes}
+      dataCenterId: ${dataCenterId}
+      networkVolumeId: ${weights.networkVolumeId}
+      volumeMountPath: /workspace
+      containerDiskInGb: 20
+      ports: 8700/http
+      env:
+        # resolved by RunPod at start-up, so the key never sits in the Pod's env in plain text
+        CLM_API_KEY: "{{ RUNPOD_SECRET_${apiKeySecret.name} }}"
+        TUNNEL_TOKEN: "{{ RUNPOD_SECRET_${tunnelTokenSecret.name} }}"
+    options:
+      provider: ${runpod}
+
+variables:
+  tunnelToken:
+    fn::invoke:
+      function: cloudflare:getZeroTrustTunnelCloudflaredToken
+      arguments:
+        accountId: ${cloudflareAccountId}
+        tunnelId: ${tunnel.id}
+      options:
+        provider: ${cloudflare}
+      return: token
+
+outputs:
+  url: https://${hostname}
+  podId: ${pod.podId}
+  # direct to the Pod, bypassing Cloudflare; needs the upstream clmApiKey (debugging only)
+  podProxyUrl: https://${pod.podId}-8700.proxy.runpod.net
+  costPerHr: ${pod.costPerHr}
+  networkVolumeId: ${weights.networkVolumeId}

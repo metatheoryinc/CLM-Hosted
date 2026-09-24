@@ -1,0 +1,5 @@
+config:
+  clm-hosted:runpodApiKey:
+    secure: AAABAHnj5YYk72Nmx8ykWnsQdr/EnEcN/F9KRX5lcJPgfDH6aF23ZkQzqcjEzaUvHqp37/4D1cgVIu7zc218vQyDjbxzVJNNfg//32W41TSCVg==
+  clm-hosted:cloudflareApiToken:
+    secure: AAABANhSsQMPJiFCjixpZ5d7c5Bqi9Mzzf4PHCKLinlb4kio2LN+3VTV4kYYT+tALmq9t4BIPhxO30qRpxAL19XNSbDlimiHxRb//xJgAdqrRH1QZg==
