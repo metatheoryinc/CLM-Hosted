@@ -11,7 +11,7 @@ agent ──► https://<hostname> ── gateway Worker ── Cloudflare Tunne
 | | resources |
 | --- | --- |
 | RunPod | GPU Pod (`ghcr.io/metatheoryinc/clm-hosted:<imageTag>`) with a 40 GB volume, secrets for the upstream key and tunnel token |
-| Cloudflare | tunnel + ingress config, proxied CNAME for `hostname`, gateway Worker ([gateway/worker.js](gateway/worker.js)) and its route |
+| Cloudflare | tunnel + ingress config, proxied CNAME for `hostname`, gateway Worker ([gateway/worker.js](gateway/worker.js)) and its route, D1 database for logged routing decisions (protected) |
 
 The image itself is built by `.github/workflows/image.yml`.
 
@@ -26,8 +26,8 @@ belongs to the older `pulumi-runpod-native` provider.
 Every credential, including the providers' own API keys, is a Pulumi secret:
 encrypted in `Pulumi.prod.yaml` (safe to commit), so there is no `.env` file.
 You need a RunPod API key (Settings → API Keys) and a Cloudflare API token.
-The Cloudflare API token needs, for the account: **Cloudflare Tunnel: Edit**
-and **Workers Scripts: Edit**; for the `metatheory.dev` zone: **Zone: Read**,
+The Cloudflare API token needs, for the account: **Cloudflare Tunnel: Edit**,
+**Workers Scripts: Edit** and **D1: Edit**; for the `metatheory.dev` zone: **Zone: Read**,
 **DNS: Edit** and **Workers Routes: Edit**. Zero Trust must be enabled on the account (the free
 plan is enough) for tunnels.
 
@@ -119,6 +119,19 @@ redeploy the Worker (the Pod is unaffected):
 ```bash
 pulumi config get agentKeys
 pulumi config set --secret agentKeys '{"agent-a": "...", "agent-b": "..."}'
+pulumi up
+```
+
+## Routing decisions
+
+The gateway also collects routing decisions from `clm.decisions` (see
+[docs/ROUTING.md](../docs/ROUTING.md)) at `/v1/decisions`, stored in the D1
+database with the posting agent's name. Each agent reads back only its own;
+agents named in `decisionReaders` read everyone's, e.g. a key for whoever
+reviews and labels decisions:
+
+```bash
+pulumi config set --path 'decisionReaders[0]' reviewer
 pulumi up
 ```
 

@@ -1,6 +1,7 @@
 # CLM, the whole stack: one always-on RunPod GPU Pod running ghcr.io/metatheoryinc/clm-hosted
 # (weights on the Pod's volume), reachable only through a Cloudflare Tunnel, with a Worker
-# gateway on the public hostname for per-agent keys and rate limits. See infra/README.md.
+# gateway on the public hostname for per-agent keys, rate limits and routing-decision
+# collection (D1). See infra/README.md.
 #
 #   agent ──► https://<hostname> ── Worker (agent key → upstream key) ── Tunnel ──► Pod :8700
 name: clm-hosted
@@ -61,6 +62,12 @@ config:
     type: string
     default: "7001"
     # any integer, unique among the account's Worker rate limits
+  decisionReaders:
+    type: array
+    items:
+      type: string
+    default: []
+    # agent names (keys of agentKeys) that may read every agent's logged routing decisions
 
 resources:
   # The new provider (github.com/runpod/pulumi-runpod) is not on PyPI; the plugin comes
@@ -119,6 +126,15 @@ resources:
 
   # ── Cloudflare: gateway Worker on the public hostname ─────────────────────
 
+  decisions:
+    type: cloudflare:D1Database
+    properties:
+      accountId: ${cloudflareAccountId}
+      name: clm-decisions-${pulumi.stack}
+    options:
+      provider: ${cloudflare}
+      protect: true   # the logged routing decisions and their labels
+
   gateway:
     type: cloudflare:WorkersScript
     properties:
@@ -137,6 +153,13 @@ resources:
         - name: UPSTREAM_KEY
           type: secret_text
           text: ${clmApiKey}
+        - name: DECISIONS
+          type: d1
+          id: ${decisions.uuid}
+        - name: DECISION_READERS
+          type: plain_text
+          text:
+            fn::toJSON: ${decisionReaders}
         - name: LIMITER
           type: ratelimit
           namespaceId: ${rateLimitNamespaceId}

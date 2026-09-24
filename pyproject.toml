@@ -35,12 +35,15 @@ verify = ["transformers>=4.51"]
 # run the Qwen3-8B embedder yourself (GPU)
 vllm = ["vllm>=0.6"]
 # tests/ (CPU torch is enough)
-test = ["pytest>=8", "httpx>=0.25", "transformers>=4.51", "huggingface_hub>=0.20"]
+# clm-decisions export (parquet for train/finetune.py --task choice)
+decisions = ["pyarrow>=12"]
+test = ["pytest>=8", "httpx>=0.25", "transformers>=4.51", "huggingface_hub>=0.20", "pyarrow>=12"]
 all = ["clm[serve,hf,verify]"]
 
 [project.scripts]
 clm-serve = "clm.server:main"
 clm-download = "clm.heads:download_main"
+clm-decisions = "clm.decisions_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Contrastive-LM/CLM"

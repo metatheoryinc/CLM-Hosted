@@ -157,6 +157,12 @@ fine-tuning, CLM reaches SOTA on both (**81.6%** and **87.6%**) while running
 
 ---
 
+## Routing Agents with CLM
+
+`clm.decisions.Router` puts CLM next to an agent's existing router: shadow it,
+log outcomes, measure with `clm-decisions report`, then let CLM decide above a
+threshold the data supports. See [docs/ROUTING.md](docs/ROUTING.md).
+
 ## Fine-tuning CLM on Your Own Data
 
 See [docs/FINETUNING.md](docs/FINETUNING.md).
@@ -349,6 +355,8 @@ The code in this repository is released under the [Apache 2.0 License](LICENSE).
 │   ├── engine.py                #   Engine.answer / .rank / .verify: the inference engine
 │   ├── verify.py                #   POST /v1/verify: best-of-N trajectories with a process head
 │   ├── recipe.py                #   the DeepSWE token recipe, shared with train/
+│   ├── decisions.py             #   Router: shadow / active routing with decision logging
+│   ├── decisions_cli.py         #   clm-decisions report / export
 │   ├── heads.py                 #   head architecture, checkpoint load / hot-reload / download
 │   ├── embedder.py              #   /v1/embeddings client + LRU cache of normalised embeddings
 │   ├── cache.py                 #   the reserved vector arena behind --action-cache
@@ -365,7 +373,8 @@ The code in this repository is released under the [Apache 2.0 License](LICENSE).
 ├── examples/                    # CLM vs Jev on the T-Rex runner (examples/t_rex/README.md)
 │   ├── common.py                #   one client for both endpoints: retries, latency, cache
 │   └── t_rex/                   #   Chrome dinosaur game in real time (run.py --model clm|jev)
-└── docs/FINETUNING.md           # the fine-tuning guide
+├── docs/FINETUNING.md           # the fine-tuning guide
+└── docs/ROUTING.md              # routing agents with CLM: shadow, measure, go active, fine-tune
 ```
 
 This branch carries the inference package, the playground, the fine-tuning script,
