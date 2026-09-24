@@ -10,4 +10,4 @@ config:
   clm-hosted:registryAuthId: cmuddk8gr003psxunmobd4qxd
   clm-hosted:cloudflareAccountId: daa733811c7150ec3148993b991a2400
   clm-hosted:cloudflareZoneId: f8a3822c528b323b90dc68789244791e
-  clm-hosted:imageTag: b22fd5fdd4d296d26e44ffba467b9fe4b85da61a
+  clm-hosted:imageTag: d330c82c2f7de5660cdca1265672c422a3df1133
