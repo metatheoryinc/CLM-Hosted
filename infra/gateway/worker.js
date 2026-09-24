@@ -40,7 +40,8 @@ function error(status, message) {
 }
 
 // ── decisions ──────────────────────────────────────────────────────────────
-// One row per event: a decision record (clm.decisions.Router) or an outcome for one.
+// One row per event: a decision record (clm.decisions.Router), or an outcome or a baseline
+// (what the existing decision-maker chose, when it is only known afterwards) for one.
 // Rows carry the posting agent; an agent reads its own rows, DECISION_READERS read all.
 
 const MAX_BODY = 1 << 20;
@@ -60,6 +61,7 @@ async function ensureSchema(db) {
 function parseEvent(e) {
   if (!e || typeof e !== "object" || typeof e.id !== "string" || !e.id || e.id.length > 128) return null;
   if (e.event === "outcome") return { kind: "outcome", dedupe: `o:${e.id}:${e.created_at || ""}:${e.label || ""}:${e.ok}` };
+  if (e.event === "baseline" && typeof e.label === "string") return { kind: "baseline", dedupe: `b:${e.id}:${e.label}` };
   if (e.questions && typeof e.questions === "object") return { kind: "record", dedupe: `r:${e.id}` };
   return null;
 }
@@ -73,7 +75,7 @@ async function postDecisions(request, env, agent) {
   if (events.length > MAX_EVENTS) return error(413, `more than ${MAX_EVENTS} events`);
   const parsed = events.map(parseEvent);
   const bad = parsed.findIndex((p) => p === null);
-  if (bad >= 0) return error(422, `event ${bad} is neither a decision record nor an outcome`);
+  if (bad >= 0) return error(422, `event ${bad} is not a decision record, outcome or baseline`);
   await ensureSchema(env.DECISIONS);
   const now = new Date().toISOString();
   const stmt = env.DECISIONS.prepare(

@@ -81,6 +81,10 @@ assert.deepEqual((await get("key-a", "?workflow=routing/chief")).events.map((e) 
   [["d1", "record"], ["d1", "outcome"]], "the workflow filter keeps a record's outcomes");
 assert.deepEqual((await get("key-b")).events.map((e) => e.id), ["d1", "d2", "d1", "b1"], "DECISION_READERS read everyone");
 
+
+assert.deepEqual(await (await post("key-a", { event: "baseline", id: "d1", label: "review", rank: 2 })).json(),
+  { stored: 1, received: 1 }, "baseline events are accepted");
+assert.equal((await post("key-a", { event: "baseline", id: "d1" })).status, 422, "a baseline needs a label");
 assert.equal((await post("key-a", "not json")).status, 422);
 assert.equal((await post("key-a", { id: "x" })).status, 422, "neither a record nor an outcome");
 assert.equal((await post("key-a", { events: Array(101).fill(record("y")) })).status, 413);

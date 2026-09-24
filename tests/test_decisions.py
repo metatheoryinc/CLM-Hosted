@@ -233,3 +233,12 @@ def test_outcomes_from_another_agent_are_ignored():
     theirs = {"event": "outcome", "id": "r1", "label": "researcher", "agent": "beta", "created_at": "t2"}
     [m] = D.merge([r, ours, theirs])
     assert m["gold"]["route"]["label"] == "reviewer" and len(m["outcome"]) == 1
+
+
+def test_baseline_events_fill_in_the_baseline_by_rank():
+    r = {k: v for k, v in rec(1, "review", 0.9, "writer").items() if k != "baseline"}
+    events = [r, {"event": "baseline", "id": "r1", "label": "review", "rank": 2, "created_at": "t1"},
+              {"event": "baseline", "id": "r1", "label": "allow", "rank": 1, "created_at": "t2"},
+              {"event": "baseline", "id": "other", "label": "block", "rank": 3}]
+    [m] = D.merge(events)
+    assert m["baseline"] == {"route": {"label": "review"}}     # the prompt outranks the later "it ran"

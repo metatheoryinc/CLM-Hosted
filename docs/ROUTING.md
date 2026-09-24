@@ -150,6 +150,11 @@ python train/finetune.py --task choice --data data/routing --workflow routing/ch
 `--labels baseline` also exports unlabelled decisions with your current router's
 choice as the label, which trains CLM to imitate that router.
 
+## In Claude Code
+
+[integrations/claude_code](../integrations/claude_code/README.md) applies the same shadow /
+measure / active loop to Claude Code's tool calls (allow / review / block) with a hook.
+
 ## Without the hosted collector
 
 `JsonlSink("decisions.jsonl")` logs to a local file instead, against any

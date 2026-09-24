@@ -270,17 +270,30 @@ def merge(events: Iterable[dict]) -> list[dict]:
     """
     recs: dict[str, dict] = {}
     outcomes: dict[str, list] = {}
+    baselines: dict[str, list] = {}
     for e in events:
         if e.get("event") == "outcome":
             outcomes.setdefault(e["id"], []).append(e)
+        elif e.get("event") == "baseline":
+            baselines.setdefault(e["id"], []).append(e)
         elif "questions" in e:
             recs[e["id"]] = dict(e)
+    same_agent = lambda r, e: not (r.get("agent") and e.get("agent") and e["agent"] != r["agent"])  # noqa: E731
+    for did, evs in baselines.items():
+        # the existing decision-maker's pick, reported after the record (e.g. by a hook), maybe
+        # in several steps: the highest ``rank`` wins, then the latest (a permission prompt, rank 2,
+        # outranks the "it ran" event that follows an approval, rank 1)
+        r = recs.get(did)
+        evs = [e for e in evs if r is not None and same_agent(r, e)]
+        if evs:
+            best = max(evs, key=lambda e: (e.get("rank", 0), e.get("created_at") or ""))
+            r["baseline"] = {QID: {"label": best["label"]}}
     for did, evs in outcomes.items():
         r = recs.get(did)
         if r is None:
             continue
         # a collector stamps events with the posting agent: only the record's own agent labels it
-        evs = [o for o in evs if not (r.get("agent") and o.get("agent") and o["agent"] != r["agent"])]
+        evs = [o for o in evs if same_agent(r, o)]
         if not evs:
             continue
         evs = sorted(evs, key=lambda o: o.get("created_at") or "")
