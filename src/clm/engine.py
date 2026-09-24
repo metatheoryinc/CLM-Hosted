@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import glob
 import os
+import threading
 from typing import Any
 
 from .cache import CacheDisabled, VectorArena
@@ -22,6 +23,7 @@ from .heads import HIDDEN, HeadPair, default_checkpoint, default_device
 from .schema import answer_from_logits, build_pairs
 
 DEFAULT_MODEL = "clm-latest"
+VERIFY_MODEL = "deepswe"          # served by /v1/verify unless the request names another head
 RAW_MODEL = "clm-raw"
 RAW_SCALE = 100.0
 RAW_SHARE = 0.125      # of the arena, for the raw ablation's wider vectors
@@ -52,6 +54,11 @@ class Engine:
             h.ensure()
         self.device = device
         self.arena = self._reserve(action_cache)
+        # /v1/verify tokenizes with the training recipe; the tokenizer loads on first use
+        self.tokenizer = os.environ.get("CLM_TOKENIZER", "Qwen/Qwen3-8B")
+        self.verify_max_len = int(os.environ.get("CLM_VERIFY_MAX_LEN", 8192))
+        self._recipe = None
+        self._recipe_lock = threading.Lock()
 
     def _reserve(self, budget: Any) -> VectorArena | None:
         """Claim the arena up front, so its cost is paid at start-up or not at all.
@@ -89,6 +96,7 @@ class Engine:
     # ------------------------------------------------------------------ models
     def models(self) -> list[dict[str, str]]:
         desc = {DEFAULT_MODEL: "Contrastive language model: Qwen3-8B encoder + trained projection heads",
+                VERIFY_MODEL: "DeepSWE trajectory verifier (8K context); use with POST /v1/verify",
                 RAW_MODEL: "Ablation: cosine in the raw encoder embedding space, no projection head"}
         names = ([DEFAULT_MODEL] if DEFAULT_MODEL in self.heads else []) + \
             sorted(n for n in self.heads if n != DEFAULT_MODEL) + [RAW_MODEL]
@@ -147,3 +155,14 @@ class Engine:
         a = self.answer(state, {"rank": q}, model, temperature)["answers"]["rank"]
         order = sorted(a["probabilities"].items(), key=lambda kv: -kv[1])
         return [{"rank": r + 1, "candidate": candidates[int(i)], "prob": p} for r, (i, p) in enumerate(order)]
+
+    def verify(self, body: dict, model: str = VERIFY_MODEL) -> dict:
+        """Best of N trajectories (``clm.verify``); raises ValueError on bad requests."""
+        if model not in self.heads:
+            raise ModelNotFound(f"unknown verifier {model!r}; available: {sorted(self.heads)}")
+        from .verify import verify
+        with self._recipe_lock:
+            if self._recipe is None:
+                from .recipe import Recipe
+                self._recipe = Recipe(self.tokenizer, self.verify_max_len)
+        return {"model": model, **verify(self, self._recipe, self.heads[model].ensure(), body)}

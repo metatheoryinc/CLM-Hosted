@@ -15,8 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 WORKDIR /opt/clm
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-# torch, numpy, requests, fastapi and uvicorn already ship with the vLLM image
-RUN pip install --no-cache-dir ".[serve]"
+# torch, numpy, requests, fastapi, uvicorn and transformers already ship with the vLLM image
+RUN pip install --no-cache-dir ".[serve,verify]"
 
 COPY deploy/entrypoint.sh /usr/local/bin/clm-entrypoint
 RUN chmod +x /usr/local/bin/clm-entrypoint
@@ -26,7 +26,8 @@ ENV HF_HOME=/workspace/hf \
     CLM_PORT=8700 \
     EMB_PORT=8090 \
     GPU_UTIL=0.80 \
-    MAX_MODEL_LEN=2048 \
+    MAX_MODEL_LEN=8192 \
+    CLM_MAX_TOKENS=2048 \
     MAX_NUM_SEQS=64
 
 EXPOSE 8700

@@ -190,6 +190,15 @@ class CLMClient:
         j, _ = self._post("/v1/rank", body)
         return j["ranked"]
 
+    def verify(self, trajectories: list[dict], model: str = "deepswe", window: int | None = None) -> dict:
+        """Best of N trajectories, each ``{"id", "steps": [{"state", "action"}]}``; ``state`` is the
+        chat messages the agent acted on. -> {"best", "trajectories": [{id, score, step_scores}]}."""
+        body: dict[str, Any] = {"trajectories": trajectories, "model": model}
+        if window is not None:
+            body["window"] = window
+        j, _ = self._post("/v1/verify", body)
+        return j
+
     def models(self) -> list[dict]:
         r = self._s.get(f"{self.base_url}/v1/models", timeout=self.timeout)
         if r.status_code != 200:

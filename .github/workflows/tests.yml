@@ -1,0 +1,45 @@
+# Tests on every push and pull request, and before every image build (image.yml calls this).
+# CPU only: the encoder is faked; the released heads and the Qwen tokenizer are downloaded.
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (CPU torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[serve,test]"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/clm-test
+          key: hf-${{ hashFiles('tests/test_heads.py', 'tests/test_recipe.py') }}
+
+      - run: CLM_TEST_CKPT_DIR="$HOME/.cache/clm-test" pytest -q
+
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node infra/gateway/worker.test.js

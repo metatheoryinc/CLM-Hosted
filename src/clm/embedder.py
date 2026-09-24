@@ -9,6 +9,7 @@ The reference head expects Qwen3-8B with last-token pooling, e.g.
 from __future__ import annotations
 
 import base64
+import hashlib
 import threading
 from collections import OrderedDict
 from typing import Any
@@ -37,9 +38,10 @@ class Embedder:
         if api_key:
             self.session.headers["Authorization"] = f"Bearer {api_key}"
 
-    def _fetch(self, texts: list[str]) -> tuple[list[np.ndarray], int]:
+    def _fetch(self, texts: list[str] | list[list[int]]) -> tuple[list[np.ndarray], int]:
         body: dict[str, Any] = {"model": self.model, "input": texts, "encoding_format": "base64"}
-        if self.max_tokens:
+        # token ids arrive already truncated by their recipe (clm.recipe); only text is cut here
+        if self.max_tokens and texts and isinstance(texts[0], str):
             body["truncate_prompt_tokens"] = self.max_tokens
         try:
             r = self.session.post(self.url, json=body, timeout=self.timeout)
@@ -58,26 +60,37 @@ class Embedder:
 
     def embed(self, texts: list[str]) -> tuple[np.ndarray, int]:
         """-> ([n, hidden] L2-normalised embeddings, encoder tokens spent on cache misses)."""
+        return self._embed(texts, texts)
+
+    def embed_ids(self, id_lists: list[list[int]]) -> tuple[np.ndarray, int]:
+        """Like ``embed`` for pre-tokenized inputs (sent to the encoder as token ids)."""
+        keys = ["ids:" + hashlib.sha1(np.asarray(ids, dtype=np.int32).tobytes()).hexdigest() for ids in id_lists]
+        return self._embed(keys, id_lists)
+
+    def _embed(self, keys: list[str], inputs: list) -> tuple[np.ndarray, int]:
         vecs: dict[str, np.ndarray] = {}
-        todo: list[str] = []
+        todo: dict[str, Any] = {}
         with self._lock:
-            for t in dict.fromkeys(texts):
-                v = self.cache.get(t)
+            for k, x in zip(keys, inputs):
+                if k in vecs or k in todo:
+                    continue
+                v = self.cache.get(k)
                 if v is None:
-                    todo.append(t)
+                    todo[k] = x
                 else:
-                    self.cache.move_to_end(t); vecs[t] = v
+                    self.cache.move_to_end(k); vecs[k] = v
         tokens = 0
-        for i in range(0, len(todo), self.batch):
-            chunk = todo[i:i + self.batch]
-            got, tk = self._fetch(chunk)
+        items = list(todo.items())
+        for i in range(0, len(items), self.batch):
+            chunk = items[i:i + self.batch]
+            got, tk = self._fetch([x for _, x in chunk])
             tokens += tk
             with self._lock:
-                for t, v in zip(chunk, got):
-                    vecs[t] = v; self.cache[t] = v
+                for (k, _), v in zip(chunk, got):
+                    vecs[k] = v; self.cache[k] = v
                 while len(self.cache) > self.cache_size:
                     self.cache.popitem(last=False)
-        return np.stack([vecs[t] for t in texts]), tokens
+        return np.stack([vecs[k] for k in keys]), tokens
 
     def healthy(self) -> bool:
         try:

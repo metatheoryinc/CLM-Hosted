@@ -7,6 +7,8 @@
                           "temperature": 1.0}          -> {"model", "answers": {id: Answer}, "usage"}
     POST /v1/rank        {"context": ..., "question": ..., "answers": [...]}
                                                        -> {"model", "ranked": [{rank, candidate, prob}]}
+    POST /v1/verify      {"trajectories": [{"id", "steps": [{"state", "action"}]}], "model": "deepswe",
+                          "window": 12}                -> {"model", "best", "trajectories": [{id, score, ...}]}
     GET  /v1/models      -> {"models": [{"name", "description", "release_date"}]}
     GET  /health         -> {"ok": true, ...}
     GET  /               -> the playground: a zero-dependency web UI for the endpoint
@@ -27,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .embedder import EmbedderError
-from .engine import DEFAULT_MODEL, Engine, ModelNotFound
+from .engine import DEFAULT_MODEL, VERIFY_MODEL, Engine, ModelNotFound
 from .heads import DEFAULT_CKPT_DIR, HF_FILE, default_device, download
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -151,6 +153,32 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
             raise HTTPException(502, str(e)) from e
         return JSONResponse({"model": body.get("model") or DEFAULT_MODEL, "ranked": ranked},
                             headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
+
+    @app.post("/v1/verify")
+    async def verify(request: Request, authorization: str | None = Header(default=None)):
+        """{trajectories: [{id, steps: [{state, action}]}][, model, window]} -> best trajectory.
+
+        Best-of-N with a process head (``clm.verify``): mean step score over each
+        trajectory's final ``window`` steps; ``best`` is the highest-scoring id.
+        """
+        auth(authorization)
+        try:
+            body = await request.json()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"body is not JSON: {e}") from e
+        if not isinstance(body, dict):
+            raise HTTPException(422, "body must be {trajectories: [..]}")
+        t0 = time.perf_counter()
+        try:
+            out = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: engine.verify(body, body.get("model") or VERIFY_MODEL))
+        except ModelNotFound as e:
+            raise HTTPException(422, str(e.args[0])) from e
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise HTTPException(422, f"invalid request: {e}") from e
+        except EmbedderError as e:
+            raise HTTPException(502, str(e)) from e
+        return JSONResponse(out, headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
 
     # mounted last: the routes above shadow it, everything else is the static UI
     if ui and os.path.isdir(STATIC_DIR):

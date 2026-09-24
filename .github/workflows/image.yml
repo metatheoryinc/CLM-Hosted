@@ -1,11 +1,12 @@
 # Build the RunPod image on GitHub's runners (nothing is built or downloaded locally)
-# and push it to ghcr.io/metatheoryinc/clm-hosted.
+# and push it to ghcr.io/metatheoryinc/clm-hosted, once the tests pass.
 name: image
 
 on:
   push:
     branches: [main]
-    paths: [Dockerfile, .dockerignore, deploy/**, src/**, pyproject.toml, .github/workflows/image.yml]
+    paths: [Dockerfile, .dockerignore, deploy/**, src/**, pyproject.toml, tests/**,
+            .github/workflows/image.yml, .github/workflows/tests.yml]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +14,11 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       # the vLLM base image is ~9 GB unpacked; the stock runner has too little free disk

@@ -30,9 +30,13 @@ dependencies = [
 serve = ["torch>=2.1", "fastapi>=0.100", "uvicorn>=0.23"]
 # download checkpoints from the Hugging Face Hub with the hub client (plain HTTPS works without it)
 hf = ["huggingface_hub>=0.20"]
+# POST /v1/verify: the training token recipe needs the Qwen tokenizer
+verify = ["transformers>=4.51"]
 # run the Qwen3-8B embedder yourself (GPU)
 vllm = ["vllm>=0.6"]
-all = ["clm[serve,hf]"]
+# tests/ (CPU torch is enough)
+test = ["pytest>=8", "httpx>=0.25", "transformers>=4.51", "huggingface_hub>=0.20"]
+all = ["clm[serve,hf,verify]"]
 
 [project.scripts]
 clm-serve = "clm.server:main"
@@ -49,3 +53,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 clm = ["py.typed", "static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: downloads tokenizers or heads from the Hugging Face Hub"]
