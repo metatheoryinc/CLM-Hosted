@@ -373,7 +373,7 @@ The code in this repository is released under the [Apache 2.0 License](LICENSE).
 ├── examples/                    # CLM vs Jev on the T-Rex runner (examples/t_rex/README.md)
 │   ├── common.py                #   one client for both endpoints: retries, latency, cache
 │   └── t_rex/                   #   Chrome dinosaur game in real time (run.py --model clm|jev)
-├── integrations/claude_code/    # Claude Code hook: CLM classifies every tool call (opt-in)
+├── integrations/claude_code/    # Claude Code hook: tool calls, subagent models, behavior checks (install.py)
 ├── docs/FINETUNING.md           # the fine-tuning guide
 └── docs/ROUTING.md              # routing agents with CLM: shadow, measure, go active, fine-tune
 ```

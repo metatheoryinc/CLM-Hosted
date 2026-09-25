@@ -14,47 +14,46 @@ of [docs/ROUTING.md](../../docs/ROUTING.md): shadow first, measure, then let CLM
   any error or after `timeout` (1.5 s) the call goes to Claude Code as usual.
 
 The hook is registered in this repo's [.claude/settings.json](../../.claude/settings.json)
-and does nothing until you opt in.
+and does nothing until you install it (below).
 
-## Opt in
+## Install
 
-Ask for your own agent key (whoever runs the [infra](../../infra/README.md) stack adds it
-to `agentKeys`), then:
-
-```bash
-mkdir -p ~/.config/clm
-```
+You need a clone of this repo and the agent key (ask whoever runs the
+[infra](../../infra/README.md) stack). Then, from the clone:
 
 ```bash
-cat > ~/.config/clm/claude-code.json <<'EOF'
-{"mode": "shadow", "base_url": "https://clm.metatheory.dev", "api_key": "<your agent key>"}
-EOF
+python3 integrations/claude_code/install.py
+```
+
+It asks for the key (or reads `--key` / `CLM_API_KEY`), registers the hook in
+`~/.claude/settings.json` for every event it handles, pointing at this clone, and writes
+`~/.config/clm/claude-code.json` (mode 600) with the defaults: **subagent model downgrades
+and behavior checks active, tool calls in shadow**. New sessions use it. Re-run it after a
+`git pull` to update the hooks; settings you changed in the config file are kept.
+
+```bash
+python3 integrations/claude_code/install.py status
 ```
 
 ```bash
-chmod 600 ~/.config/clm/claude-code.json
+python3 integrations/claude_code/install.py uninstall
 ```
 
-It takes effect on the next tool call. `CLM_HOOK_MODE=off claude` disables it for one
-session; `"mode": "off"` disables it everywhere.
+`uninstall` removes only this hook's entries (a timestamped backup of `settings.json` is
+kept) and sets the config to `"mode": "off"`, which also silences the copy registered in
+this repo's own [.claude/settings.json](../../.claude/settings.json); `--purge` deletes the
+config and the key in it. For one session only: `CLM_HOOK_MODE=off claude`. `--shadow` at
+install logs everything and changes nothing.
 
-### In every repo
+What active means for you: a subagent Claude would run on Opus may run on Sonnet or Haiku
+when CLM is confident the task does not need it; at the end of a turn Claude may be told to
+verify or fix something (see [Behavior checks](#behavior-checks-when-a-turn-ends)); unsure
+cases ask Opus (`claude -p`, on your own account, a few seconds, only then). Any CLM error
+or timeout leaves Claude Code as it was.
 
-The config file is per machine; to classify tool calls in every project, add the hooks
-to `~/.claude/settings.json` too, pointing at your checkout of this repo. Use this
-command (not a bare `python3 <path>`): if the file is ever missing, `python3` exits
-with code 2, which Claude Code treats as "block the tool call", in every session.
-
-```json
-"command": "f=\"/path/to/CLM-Hosted/integrations/claude_code/clm_hook.py\"; [ -f \"$f\" ] && python3 \"$f\"; exit 0"
-```
-
-Register it for the same eight events as this repo's
-[.claude/settings.json](../../.claude/settings.json) (`matcher: ""`; `timeout: 40` and not
-async for `PreToolUse`, `Stop` and `SubagentStop`, which may block; `timeout: 5`,
-`async: true` for PermissionRequest, PermissionDenied, PostToolUse, PostToolUseFailure
-and SubagentStart). In this repo both registrations fire; the
-hook handles each event once and the second copy exits.
+To change the settings by hand, edit the config file; the keys are in `DEFAULTS` at the top
+of [clm_hook.py](clm_hook.py). If the clone moves or is deleted the hook does nothing (the
+registered command checks the file exists first), rather than blocking every tool call.
 
 ## Subagent model tiers
 
