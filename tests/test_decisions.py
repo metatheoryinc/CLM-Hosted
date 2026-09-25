@@ -9,7 +9,7 @@ import time
 import pytest
 
 from clm import decisions as D
-from clm.decisions_cli import main as cli, summarize, to_row
+from clm.decisions_cli import auroc, cascade, main as cli, print_report, summarize, to_row
 
 WORKERS = {"researcher": "Collects the sources the task still needs.",
            "writer": "Drafts the deliverable from sources already collected.",
@@ -203,7 +203,6 @@ def test_summary_numbers():
     assert (s["gold"]["n"], s["gold"]["clm"], s["gold"]["baseline"]) == (3, 2, 2)
     t80 = next(t for t in s["thresholds"] if t["threshold"] == 0.8)
     assert t80["coverage"] == [3, 4] and t80["gold"] == [2, 2]
-    assert t80["hybrid_gold"] == [3, 3]            # CLM above 0.8, router below: all right
     assert s["disagreements"][0]["n"] == 1
 
 
@@ -251,3 +250,68 @@ def test_router_requests_calibration_unless_disabled():
     r2, _ = router(mode="active", calibrate=None)
     r2.route("s", WORKERS, baseline="writer")
     assert "calibrate" not in r2.client.calls[-1][1]
+
+
+
+@pytest.mark.parametrize("scores, pos", [
+    ([0.9, 0.8, 0.7, 0.6], [True, True, False, False]),         # perfect separation
+    ([0.9, 0.8, 0.7, 0.6], [False, False, True, True]),         # perfectly wrong
+    ([0.5, 0.5, 0.5, 0.5], [True, False, True, False]),         # ties everywhere
+    ([0.9, 0.3, 0.7, 0.7, 0.2, 0.6], [True, False, True, False, False, True]),
+])
+def test_auroc_matches_the_pairwise_definition(scores, pos):
+    P = [s for s, y in zip(scores, pos) if y]
+    N = [s for s, y in zip(scores, pos) if not y]
+    brute = sum((p > n) + 0.5 * (p == n) for p in P for n in N) / (len(P) * len(N))
+    assert auroc(scores, pos) == pytest.approx(brute)
+
+
+def test_auroc_needs_both_classes():
+    assert auroc([0.9, 0.8], [True, True]) is None and auroc([], []) is None
+
+
+def labelled(n_right_conf, n_wrong_low, n_right_low):
+    """CLM right and confident, CLM wrong but unsure, CLM right but unsure; the router is always right."""
+    recs, i = [], 0
+    for n, clm, p in ((n_right_conf, "writer", 0.95), (n_wrong_low, "reviewer", 0.55), (n_right_low, "writer", 0.6)):
+        for _ in range(n):
+            recs.append(rec(i, clm, p, "writer", "writer")); i += 1
+    return recs
+
+
+def test_cascade_against_gold():
+    c = cascade(labelled(15, 5, 5), "gold")
+    assert c["reference"] == "gold" and c["n"] == 25 and c["fallback_correct"] == 25
+    at = {x["threshold"]: x for x in c["rows"]}
+    assert at[0.9]["coverage"] == [15, 25] and at[0.9]["accepted_correct"] == [15, 15]
+    assert at[0.9]["cascade_correct"] == [25, 25] and at[0.9]["retained"] == 1.0
+    assert at[0.5]["cascade_correct"] == [20, 25] and at[0.5]["retained"] == pytest.approx(0.8)
+    # the most coverage that keeps >= 99%: taking the 0.6s too is fine, the 0.55s are not
+    assert c["operating_point"]["threshold"] == 0.6 and c["operating_point"]["coverage"] == [20, 25]
+
+
+def test_summary_falls_back_to_the_router_as_reference_without_gold():
+    recs = [{k: v for k, v in r.items() if k != "gold"} for r in labelled(15, 5, 5)]
+    s = summarize(recs)
+    assert s["cascade"]["reference"] == "baseline" and s["confidence_auroc"]["gold"] is None
+    assert s["confidence_auroc"]["agreement"] == pytest.approx(1.0)   # CLM is unsure exactly when it disagrees
+
+
+def test_the_report_prints_both_modes(capsys):
+    print_report("routing/x", summarize(labelled(15, 5, 5)))
+    print_report("routing/y", summarize([{k: v for k, v in r.items() if k != "gold"} for r in labelled(15, 5, 5)]))
+    out = capsys.readouterr().out
+    assert "confidence AUROC" in out and "scored against gold" in out and "operating point" in out
+    assert "no gold yet" in out
+
+
+def test_report_splits_by_answering_model_and_filters(tmp_path, capsys):
+    a = [dict(r, clm={**r["clm"], "model": "clm-latest"}) for r in labelled(3, 1, 1)]
+    b = [dict(r, id=r["id"] + "b", clm={**r["clm"], "model": "tier-v2"}) for r in labelled(4, 0, 0)]
+    src = tmp_path / "d.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in a + b))
+    cli(["report", str(src), "--json"])
+    assert set(json.loads(capsys.readouterr().out)) == {"routing/chief [clm-latest]", "routing/chief [tier-v2]"}
+    cli(["report", str(src), "--json", "--model", "tier-v2"])
+    out = json.loads(capsys.readouterr().out)
+    assert list(out) == ["routing/chief"] and out["routing/chief"]["records"] == 4

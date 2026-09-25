@@ -103,9 +103,25 @@ Per router (`workflow`), it shows:
 * **thresholds**: at each threshold, the share of decisions CLM would take, how good
   those are, and the accuracy of "CLM above the threshold, your router below".
 
-Before going active, look for: a few hundred labelled decisions, the
-"CLM + router" column at or above your router alone at the threshold you pick, and
-a threshold that still lets CLM take a useful share.
+* **confidence AUROC**: the chance that a random right answer of CLM's has a higher
+  probability than a random wrong one (0.5: the probability tells you nothing; 1.0: it
+  separates them perfectly). This is what makes a threshold meaningful at all;
+* **cascade**: accept CLM when its top probability reaches the threshold, escalate to
+  your router otherwise. At each threshold: the share of decisions CLM takes (router
+  calls saved), how often its accepted decisions are right, the cascade's accuracy, and
+  the accuracy *retained* relative to your router alone; the **operating point** is the
+  threshold with the most coverage that keeps at least 99% of it.
+
+Sections are split by the CLM model that answered (`--model` selects one), so a newly
+trained head is not averaged with the one it replaced. Without gold labels the cascade
+is scored against your router, which measures agreement, not accuracy; that is useless
+for a router meant to disagree (picking cheaper models), so label a sample first.
+
+Before going active, look for: a few hundred labelled decisions, a confidence AUROC well
+above 0.5, and an operating point where CLM still takes a useful share. (These are the
+metrics of *JEV-as-a-Judge: Accept When Confident, Escalate When Unsure*, Li et al.,
+CMU, 2026, whose accept-or-escalate cascade kept 99% of GPT-6's accuracy at a 0.9
+threshold on its benchmarks; re-derive the threshold for each decision, as it did.)
 
 ## 4. Go active
 

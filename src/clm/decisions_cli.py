@@ -7,8 +7,11 @@
 
 ``report`` answers the questions that decide whether CLM can take over a router:
 how often it agrees with the current router, how accurate each is where the right
-answer is known (``gold``, from outcomes), whether CLM's probability tracks that, and,
-for each threshold, how many decisions CLM would take and how good those are.
+answer is known (``gold``, from outcomes), whether CLM's probability tracks that
+(confidence AUROC: how well the top probability separates CLM's right answers from its
+wrong ones), and the accept-when-confident / escalate-when-unsure cascade: at each
+threshold, the share of decisions CLM takes (the fallback calls saved) and the accuracy
+the cascade keeps relative to the fallback alone.
 """
 from __future__ import annotations
 
@@ -23,6 +26,9 @@ from collections import Counter, defaultdict
 from .decisions import QID, merge, read_jsonl
 
 THRESHOLDS = (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95)
+CASCADE_THRESHOLDS = (0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.925, 0.95, 0.975, 0.99)
+RETAIN_TARGET = 0.99            # the operating point: keep >= 99% of the fallback's accuracy
+MIN_GOLD_FOR_CASCADE = 20
 BUCKETS = ((0.0, 0.5), (0.5, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01))
 
 
@@ -68,6 +74,47 @@ def _rate(hits: int, n: int) -> str:
     return f"{hits / n:6.1%} ({hits}/{n})" if n else "     -"
 
 
+def auroc(scores: list[float], positive: list[bool]) -> float | None:
+    """P(score of a random positive > score of a random negative), ties counted half; None if
+    either class is empty."""
+    pos = [s for s, y in zip(scores, positive) if y]
+    neg = [s for s, y in zip(scores, positive) if not y]
+    if not pos or not neg:
+        return None
+    ranked = sorted((s, y) for s, y in zip(scores, positive))
+    rank_sum, i = 0.0, 0
+    while i < len(ranked):                       # average ranks over ties
+        j = i
+        while j < len(ranked) and ranked[j][0] == ranked[i][0]:
+            j += 1
+        avg = (i + 1 + j) / 2
+        rank_sum += avg * sum(1 for k in range(i, j) if ranked[k][1])
+        i = j
+    return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+
+
+def cascade(recs: list[dict], reference: str) -> dict:
+    """Accept CLM when its top probability >= t, else escalate to the baseline (the fallback),
+    scored against ``reference`` ("gold", or "baseline" when there is no gold)."""
+    rows = [r for r in recs if _label(r, "baseline") and _label(r, reference)]
+    truth = lambda r: _label(r, reference)                                   # noqa: E731
+    fallback_ok = sum(_label(r, "baseline") == truth(r) for r in rows)
+    out = {"reference": reference, "n": len(rows), "fallback_correct": fallback_ok, "rows": []}
+    for t in CASCADE_THRESHOLDS:
+        take = [r for r in rows if r["clm"]["probability"] >= t]
+        take_ok = sum(r["clm"]["choice"] == truth(r) for r in take)
+        esc_ok = sum(_label(r, "baseline") == truth(r) for r in rows if r["clm"]["probability"] < t)
+        cas = take_ok + esc_ok
+        out["rows"].append({"threshold": t, "coverage": [len(take), len(rows)], "accepted_correct": [take_ok, len(take)],
+                            "cascade_correct": [cas, len(rows)],
+                            "retained": cas / fallback_ok if fallback_ok else None})
+    ok = [x for x in out["rows"] if x["retained"] is not None and x["retained"] >= RETAIN_TARGET]
+    best = max(ok, key=lambda x: (x["coverage"][0], -x["threshold"]), default=None)
+    out["operating_point"] = ({"threshold": best["threshold"], "coverage": best["coverage"],
+                               "retained": best["retained"]} if best and best["coverage"][0] else None)
+    return out
+
+
 def summarize(recs: list[dict]) -> dict:
     answered = [r for r in recs if (r.get("clm") or {}).get("choice")]
     errors = [r for r in recs if (r.get("clm") or {}).get("error")]
@@ -98,13 +145,15 @@ def summarize(recs: list[dict]) -> dict:
     for t in THRESHOLDS:
         take = [r for r in answered if r["clm"]["probability"] >= t]
         tb, tg = [r for r in take if _label(r, "baseline")], [r for r in take if _label(r, "gold")]
-        # what the agent would have got: CLM above the threshold, the baseline below it
-        hybrid = [r for r in gold if _label(r, "baseline")]
-        hyb_ok = sum(1 for r in hybrid if (r["clm"]["choice"] if r["clm"]["probability"] >= t
-                                           else _label(r, "baseline")) == _label(r, "gold"))
         out["thresholds"].append({"threshold": t, "coverage": [len(take), len(answered)],
-                                  "agreement": [sum(map(agree, tb)), len(tb)], "gold": [sum(map(clm_ok, tg)), len(tg)],
-                                  "hybrid_gold": [hyb_ok, len(hybrid)]})
+                                  "agreement": [sum(map(agree, tb)), len(tb)], "gold": [sum(map(clm_ok, tg)), len(tg)]})
+
+    # does CLM's top probability tell its right answers from its wrong ones?
+    out["confidence_auroc"] = {
+        "gold": auroc([r["clm"]["probability"] for r in gold], [clm_ok(r) for r in gold]),
+        "agreement": auroc([r["clm"]["probability"] for r in with_base], [agree(r) for r in with_base])}
+    n_gold_base = sum(1 for r in gold if _label(r, "baseline"))
+    out["cascade"] = cascade(answered, "gold" if n_gold_base >= MIN_GOLD_FOR_CASCADE else "baseline")
 
     pairs = Counter((_label(r, "baseline"), r["clm"]["choice"]) for r in with_base if not agree(r))
     out["disagreements"] = [{"baseline": b, "clm": c, "n": n} for (b, c), n in pairs.most_common(10)]
@@ -125,10 +174,32 @@ def print_report(name: str, s: dict) -> None:
         lo, hi = c["bucket"]
         mean = f"{c['mean_probability']:.2f}" if c["mean_probability"] is not None else "   -"
         p(f"   {lo:.2f}-{hi:.2f}   {c['n']:6d}   {mean}   {_rate(*c['agreement']):>18}   {_rate(*c['gold']):>18}")
-    p("\n   threshold   CLM decides        agrees w/ router     correct (gold)       CLM+router on gold")
+    fmt = lambda v: "     -" if v is None else f"{v:.3f}"                     # noqa: E731
+    ca = s["confidence_auroc"]
+    p(f"\n   confidence AUROC (top probability: right vs wrong)   vs gold {fmt(ca['gold'])}   "
+      f"vs current router {fmt(ca['agreement'])}")
+    p("\n   threshold   CLM decides        agrees w/ router     correct (gold)")
     for t in s["thresholds"]:
         p(f"   {t['threshold']:.2f}       {_rate(*t['coverage']):>16}   {_rate(*t['agreement']):>18}   "
-          f"{_rate(*t['gold']):>18}   {_rate(*t['hybrid_gold']):>18}")
+          f"{_rate(*t['gold']):>18}")
+    c = s["cascade"]
+    if c["n"]:
+        ref = "gold" if c["reference"] == "gold" else "the current router (no gold yet: agreement, not accuracy)"
+        if c["reference"] != "gold":
+            p("   note: without gold the cascade only measures agreement with the current router; for a router")
+            p("   meant to disagree with it (e.g. picking cheaper models), label a sample to score it")
+        p(f"\n   cascade: CLM when p >= t, else escalate to the current router; scored against {ref}, "
+          f"{c['n']} decisions")
+        p(f"   fallback alone: {_rate(c['fallback_correct'], c['n'])}")
+        p("   threshold   CLM decides (calls saved)   CLM's accepted correct   cascade correct      retained")
+        for x in c["rows"]:
+            ret = "     -" if x["retained"] is None else f"{x['retained']:6.1%}"
+            p(f"   {x['threshold']:.3f}      {_rate(*x['coverage']):>22}   {_rate(*x['accepted_correct']):>22}   "
+              f"{_rate(*x['cascade_correct']):>18}   {ret}")
+        op = c["operating_point"]
+        p(f"   operating point (>= {RETAIN_TARGET:.0%} of the fallback's accuracy kept): " +
+          (f"t = {op['threshold']}, CLM decides {_rate(*op['coverage']).strip()}, retained {op['retained']:.1%}"
+           if op else "none: no threshold keeps it while CLM decides anything"))
     if s["disagreements"]:
         p("\n   most common disagreements (router -> CLM):")
         for d in s["disagreements"]:
@@ -137,9 +208,17 @@ def print_report(name: str, s: dict) -> None:
 
 def report(args) -> None:
     recs = load(args.sources, args.workflow)
+    if args.model:
+        recs = [r for r in recs if (r.get("clm") or {}).get("model") == args.model]
+    # one section per workflow and answering model: pooling heads hides how the current one does
+    models = defaultdict(set)
+    for r in recs:
+        models[r.get("workflow") or "?"].add((r.get("clm") or {}).get("model") or "?")
     by = defaultdict(list)
     for r in recs:
-        by[r.get("workflow") or "?"].append(r)
+        w = r.get("workflow") or "?"
+        m = (r.get("clm") or {}).get("model") or "?"
+        by[f"{w} [{m}]" if len(models[w]) > 1 else w].append(r)
     result = {w: summarize(rs) for w, rs in sorted(by.items())}
     if args.json:
         json.dump(result, sys.stdout, indent=2)
@@ -195,6 +274,7 @@ def main(argv: list[str] | None = None) -> None:
         sp = sub.add_parser(name)
         sp.add_argument("sources", nargs="+", help="JsonlSink files and/or collector base URLs")
         sp.add_argument("--workflow", help="only this workflow (routing/<router name>)")
+        sp.add_argument("--model", help="only decisions answered by this CLM model (e.g. a trained head)")
         sp.set_defaults(fn=fn)
         if name == "report":
             sp.add_argument("--json", action="store_true")
