@@ -451,6 +451,14 @@ def test_a_slow_judge_leaves_the_call_alone(run, fake_judge):
     assert "TimeoutExpired" in sub["escalation"]["error"] and sub["acted"] == "baseline"
 
 
+def test_a_judge_that_cannot_tell_leaves_the_call_alone(run, fake_judge):
+    p, _, clm = esc_run(run, fake_judge, agent_call(tid="toolu_e7"), UNSURE, "not_observable")
+    assert p.stdout == "" and fake_judge["calls"]() == 1
+    sub = next(r for r in clm.wait(2) if r.get("workflow") == "routing/claude-code-subagents")
+    assert sub["escalation"]["abstained"] is True and "error" not in sub["escalation"]
+    assert sub["acted"] == "baseline"
+
+
 LEANS_REVIEW = {"allow": 0.30, "review": 0.60, "block": 0.10}
 
 

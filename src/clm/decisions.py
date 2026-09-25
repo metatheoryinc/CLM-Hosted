@@ -24,6 +24,10 @@ Modes:
   on any error or timeout, the baseline does. ``baseline`` may be a callable, which then
   runs only on those fallbacks (the point: no LLM call when CLM is confident).
 
+``abstain=True`` adds a ``not_observable`` option ("the state does not contain enough to
+decide"). When CLM picks it, the decision escalates to the baseline whatever the
+probability: an abstention is CLM saying the state is missing what the decision needs.
+
 A record is ``{id, workflow, state, questions, baseline, clm, acted, worker}`` plus
 ``outcome`` / ``gold`` once known; ``clm-decisions report`` measures them and
 ``clm-decisions export`` writes the labelled ones as fine-tuning data.
@@ -43,6 +47,8 @@ from typing import Any, Callable, Iterable
 
 QID = "route"
 MODES = ("shadow", "active")
+ABSTAIN = "not_observable"
+ABSTAIN_TEXT = "The information given does not contain enough to decide."
 
 
 def _now() -> str:
@@ -135,12 +141,18 @@ class Decision:
     record: dict = field(default_factory=dict, repr=False)
 
 
+def _best_worker(clm: dict) -> str | None:
+    """CLM's most likely real worker (never the abstain option)."""
+    probs = {k: v for k, v in (clm.get("probabilities") or {}).items() if k != ABSTAIN}
+    return max(probs, key=probs.get) if probs else None
+
+
 class Router:
     """Route a task to one of ``workers`` with CLM, logging every decision to ``sink``."""
 
     def __init__(self, name: str, instructions: str, sink=None, mode: str = "shadow",
                  threshold: float = 0.8, client=None, model: str | None = None,
-                 timeout: float = 2.0, calibrate: str | None = "content-free"):
+                 timeout: float = 2.0, calibrate: str | None = "content-free", abstain: bool = False):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         if not 0 < threshold <= 1:
@@ -150,6 +162,7 @@ class Router:
         self.client = client or CLMClient(timeout=timeout)
         self.model = model or os.environ.get("CLM_MODEL") or self.client.model
         self.calibrate = calibrate            # "content-free": remove each option's lean (None: off)
+        self.abstain = abstain                # offer CLM a not_observable option, which escalates
         self._pending: set[threading.Thread] = set()
         self._pending_lock = threading.Lock()
 
@@ -157,8 +170,12 @@ class Router:
     def question(self, workers: dict[str, str]) -> dict:
         if not workers or len(workers) < 2:
             raise ValueError("workers must name at least two options")
-        return {QID: {"type": "choice", "instructions": self.instructions,
-                      "criteria": {str(k): str(v) for k, v in workers.items()}}}
+        if ABSTAIN in workers:
+            raise ValueError(f"{ABSTAIN!r} is reserved for abstaining")
+        criteria = {str(k): str(v) for k, v in workers.items()}
+        if self.abstain:
+            criteria[ABSTAIN] = ABSTAIN_TEXT
+        return {QID: {"type": "choice", "instructions": self.instructions, "criteria": criteria}}
 
     def _ask(self, state: Any, questions: dict) -> dict:
         t0 = time.perf_counter()
@@ -193,7 +210,7 @@ class Router:
             b = baseline() if callable(baseline) else baseline
             if b is None:
                 raise ValueError("no baseline: pass the current router's choice (or mode='active')")
-            if str(b) not in questions[QID]["criteria"]:
+            if str(b) not in questions[QID]["criteria"] or str(b) == ABSTAIN:
                 raise ValueError(f"baseline {b!r} is not one of the workers {list(questions[QID]['criteria'])}")
             return str(b)
 
@@ -208,12 +225,13 @@ class Router:
 
         clm = self._ask(state, questions)
         rec["clm"] = clm
-        if "error" not in clm and clm["probability"] >= self.threshold:
+        abstained = clm.get("choice") == ABSTAIN
+        if "error" not in clm and not abstained and clm["probability"] >= self.threshold:
             worker, acted = clm["choice"], "clm"
             if baseline is not None and not callable(baseline):
                 rec["baseline"] = {QID: {"label": base()}}
         else:
-            worker, acted = (base() if baseline is not None else clm.get("choice")), "baseline"
+            worker, acted = (base() if baseline is not None else _best_worker(clm)), "baseline"
             if worker is None:
                 raise RuntimeError(f"CLM failed and there is no baseline: {clm.get('error')}")
             if baseline is not None:
@@ -250,7 +268,7 @@ class Router:
         did = decision.id if isinstance(decision, Decision) else str(decision)
         if isinstance(decision, Decision) and label is not None:
             options = decision.record["questions"][QID]["criteria"]
-            if label not in options:
+            if label not in options or label == ABSTAIN:
                 raise ValueError(f"label {label!r} is not one of the workers {list(options)}")
         self._emit({"event": "outcome", "id": did, "created_at": _now(), "ok": ok, "label": label, "note": note})
 

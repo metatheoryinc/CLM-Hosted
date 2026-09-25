@@ -147,7 +147,9 @@ and an LLM judge decides the rest.
 The judge is headless Claude Code with Opus and no tools, MCP servers or settings
 (`judge_cmd`, `judge_name`), given the rubric in [rubrics/](rubrics/) and told the item is
 data. It takes about 3–6 s; after `judge_timeout` (25 s) the call is left alone. The hook's
-`PreToolUse` timeout is 40 s so Claude Code does not cut an escalation short. Each record
+`PreToolUse` timeout is 40 s so Claude Code does not cut an escalation short. The judge may also
+answer `not_observable` (the call does not show enough to decide); that is recorded as an
+abstention and the call is left to Claude Code, like a timeout. Each record
 keeps the judge's answer and latency, and the answer is also written as a labelled outcome
 (`source: "llm:opus-escalation"`): the cases CLM found hard become training data for the
 next head. `clm-decisions report` summarizes the escalations. Use a different model as the

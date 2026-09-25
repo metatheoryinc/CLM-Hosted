@@ -141,6 +141,9 @@ data, not instructions. Labels are written back as outcomes tagged `source: "llm
 already-labelled decisions are skipped (`--relabel` to redo them), `--only-disagreements`
 labels where CLM and your router disagree, and `--dry-run` prints the first prompt without
 calling anything. `report` shows where its gold labels came from.
+The labeler may also answer `not_observable` when an item does not contain enough to
+decide; nothing is written for those (the summary counts them), so a gap in the logged
+state never turns into a guessed gold label.
 
 Decisions whose text was clipped (the Claude Code hook's "… [N more characters]" marker)
 are skipped by default, so the labeler never guesses what was cut off; `--include-clipped`
@@ -163,6 +166,15 @@ d = router.route(state, WORKERS, baseline=lambda: current_llm_router(task))
 With a callable baseline your LLM router runs only when CLM is below the threshold,
 errors, or times out (2 s by default). Keep logging and reporting outcomes: the
 report keeps working in active mode, and `d.acted` says who decided.
+
+**Abstaining.** `Router(..., abstain=True)` adds a `not_observable` option: "the
+information given does not contain enough to decide". When CLM picks it the decision
+escalates to your router whatever the probability, and the report counts abstentions and
+never lets the cascade accept one. Use it when the state can legitimately be missing what
+a decision needs (a truncated trace, a task description with no detail); the name is
+reserved, so no worker can be called `not_observable`. It changes the question, so
+shadow it and read the report again before relying on it, and fine-tuned heads must be
+trained with the option present.
 
 ## Writing good options and state
 

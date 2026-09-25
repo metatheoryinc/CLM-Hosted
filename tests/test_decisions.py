@@ -323,7 +323,8 @@ FAKE_LABELER = r'''
 import json, re, sys
 prompt = sys.stdin.read()
 ids = re.findall(r"### item (\S+)", prompt)
-out = [{"id": i, "label": "bogus" if i.endswith("7") else "researcher", "confidence": "high", "reason": "r"}
+out = [{"id": i, "label": "not_observable" if i == "r11" else "bogus" if i.endswith("7") else "researcher",
+        "confidence": "high", "reason": "r"}
        for i in ids]
 print(json.dumps({"type": "result", "result": "Here you go:\n```json\n" + json.dumps(out) + "\n```"}))
 '''
@@ -347,7 +348,7 @@ def decisions_file(tmp_path, n=10):
 def test_label_writes_llm_labels_that_the_report_uses(tmp_path, labeler, capsys):
     src = decisions_file(tmp_path)
     cli(["label", str(src), "--sample", "10", "--labeler", labeler, "--labeler-name", "fake", "--batch", "4"])
-    assert "done: 9 labelled, 1 skipped" in capsys.readouterr().out            # r7's answer is not an option
+    assert "done: 9 labelled, 0 not observable (left unlabelled), 1 skipped" in capsys.readouterr().out            # r7's answer is not an option
     recs = {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}
     assert recs["r3"]["gold"] == {"route": {"label": "researcher"}} and "gold" not in recs["r7"]
     assert recs["r3"]["outcome"][-1]["source"] == "llm:fake"
@@ -423,3 +424,53 @@ def test_retract_clipped_only_touches_model_labels(tmp_path, labeler, capsys):
     assert "retracted 1 model labels" in capsys.readouterr().out
     recs = {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}
     assert "gold" not in recs["r0"] and recs["r1"]["gold"] and recs["r2"]["gold"]["route"]["label"] == "writer"
+
+
+# ── abstaining (not_observable) ──────────────────────────────────────────────
+
+ABSTAINS = {"researcher": 0.05, "writer": 0.03, "reviewer": 0.02, "not_observable": 0.9}
+
+
+def test_abstain_adds_an_option_only_when_asked():
+    r, _ = router(abstain=True)
+    assert r.question(WORKERS)["route"]["criteria"]["not_observable"] == D.ABSTAIN_TEXT
+    r2, _ = router()
+    assert "not_observable" not in r2.question(WORKERS)["route"]["criteria"]
+    with pytest.raises(ValueError, match="reserved"):
+        r.route("s", {**WORKERS, "not_observable": "x"}, baseline="writer")
+
+
+def test_an_abstention_escalates_however_confident():
+    r, sink = router(mode="active", threshold=0.5, abstain=True, client=FakeClient(ABSTAINS))
+    d = r.route("s", WORKERS, baseline=lambda: "writer")
+    assert (d.worker, d.acted, d.clm) == ("writer", "baseline", "not_observable")
+    # with nothing to fall back to, CLM's best real worker, never the abstain option
+    r2, _ = router(mode="active", threshold=0.5, abstain=True, client=FakeClient(ABSTAINS))
+    assert r2.route("s", WORKERS).worker == "researcher"
+
+
+def test_abstain_is_not_a_worker_label():
+    r, _ = router(mode="active", abstain=True)
+    d = r.route("s", WORKERS, baseline="writer")
+    with pytest.raises(ValueError):
+        r.outcome(d, label="not_observable")
+    with pytest.raises(ValueError):
+        r.route("s", WORKERS, baseline="not_observable")
+
+
+def test_the_cascade_never_accepts_an_abstention():
+    recs = labelled(15, 5, 5)
+    for r in recs[:5]:
+        r["clm"] = {"choice": "not_observable", "probability": 0.99, "latency_ms": 1.0}
+    s = summarize(recs)
+    at = {x["threshold"]: x for x in s["cascade"]["rows"]}
+    assert s["clm_abstained"] == 5 and at[0.9]["coverage"] == [10, 25] and at[0.9]["retained"] == 1.0
+
+
+def test_the_labeler_may_say_not_observable_and_writes_nothing_for_it(tmp_path, labeler, capsys):
+    src = decisions_file(tmp_path, n=12)
+    cli(["label", str(src), "--sample", "12", "--labeler", labeler])
+    assert "done: 10 labelled, 1 not observable (left unlabelled), 1 skipped" in capsys.readouterr().out
+    assert "gold" not in {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}["r11"]
+    cli(["label", str(src), "--labeler", labeler, "--dry-run"])
+    assert "- not_observable: the item does not contain enough" in capsys.readouterr().out
