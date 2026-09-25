@@ -528,11 +528,21 @@ def run_choice(args) -> dict:
         opt_tgt = torch.tensor([(e.target if args.targets == "soft" else
                                  [float(i == e.label) for i in range(len(e.keys))]) + [0.0] * (kmax - len(e.keys))
                                 for e in tr], device=device)
+        # --balance: weight each example by 1 / (its gold label's frequency within its question)
+        freq = defaultdict(int)
+        for e in tr:
+            freq[e.qid, e.keys[e.label]] += 1
+        n_lab = defaultdict(int)
+        for q_, _ in freq:
+            n_lab[q_] += 1
+        row_w = torch.tensor([(freq[e.qid, e.keys[e.label]] * n_lab[e.qid]) ** -args.balance_power
+                              if args.balance else 1.0 for e in tr], device=device)
+        row_w = row_w * len(tr) / row_w.sum()
 
     def infonce_loss(idx):
         """Bidirectional in-batch InfoNCE over the batch's distinct option texts: states -> options
         against the gold distribution, options -> states against the states that hold them."""
-        oi, tg = opt_idx[idx], opt_tgt[idx]
+        oi, tg = opt_idx[idx], opt_tgt[idx] * row_w[idx, None]
         valid = oi >= 0
         pool, col = torch.unique(oi[valid], return_inverse=True)
         cols = torch.zeros_like(oi)
@@ -541,7 +551,8 @@ def run_choice(args) -> dict:
         zq = F.normalize(sh(emb[st_idx[idx]]), dim=-1)
         zc = F.normalize(ah(emb[pool]), dim=-1)
         lg = logit_scale.exp().clamp(max=100.0) * zq @ zc.t()
-        fwd = -(tgt * F.log_softmax(lg, 1)).sum(1).mean()
+        rw = tgt.sum(1)                                   # the row weights (targets sum to 1 per row)
+        fwd = -((tgt / rw[:, None].clamp(min=1e-12)) * F.log_softmax(lg, 1)).sum(1).mul(rw).sum() / rw.sum()
         w = tgt.t()
         keep = w.sum(1) > 0
         w = w[keep] / w[keep].sum(1, keepdim=True)
@@ -551,18 +562,24 @@ def run_choice(args) -> dict:
     @torch.no_grad()
     def evaluate(split):
         sh.eval(); ah.eval()
-        hit = n = 0; ce = 0.0; per = defaultdict(lambda: [0, 0])
+        hit = n = 0; ce = 0.0; per = defaultdict(lambda: [0, 0]); rec = defaultdict(lambda: [0, 0])
         for q, c, tgt, lab, qids in data[split]:
             lg = logits(q, c)
             pred = lg.argmax(-1)
             ce += -(tgt * F.log_softmax(lg, -1)).sum(-1).sum().item()
             ok = (pred == lab).tolist()
             hit += sum(ok); n += len(ok)
-            for qid, o in zip(qids, ok):
+            for qid, o, lb in zip(qids, ok, lab.tolist()):
                 per[qid][0] += o; per[qid][1] += 1
+                rec[qid, lb][0] += o; rec[qid, lb][1] += 1
         sh.train(); ah.train()
-        return {"acc": hit / max(1, n), "soft_ce": ce / max(1, n),
-                "per_question": {k: round(h / t, 4) for k, (h, t) in sorted(per.items())}}
+        by_q = defaultdict(list)
+        for (qid, lb), (h, t) in rec.items():
+            by_q[qid].append(h / t)
+        bal = [sum(v) / len(v) for v in by_q.values()]
+        return {"acc": hit / max(1, n), "balanced_acc": sum(bal) / max(1, len(bal)), "soft_ce": ce / max(1, n),
+                "per_question": {k: round(h / t, 4) for k, (h, t) in sorted(per.items())},
+                "recall": {f"{qid}:{lb}": round(h / t, 4) for (qid, lb), (h, t) in sorted(rec.items())}}
 
     def majority_baseline(split):
         counts = defaultdict(lambda: defaultdict(int))
@@ -594,7 +611,8 @@ def run_choice(args) -> dict:
                 "epoch": epoch, "metrics": metrics}
 
     g = torch.Generator().manual_seed(args.seed)
-    best, best_ep, bad, history = m0["val"]["acc"], 0, 0, [{"epoch": 0, **m0}]
+    sel = args.select_metric
+    best, best_ep, bad, history = m0["val"][sel], 0, 0, [{"epoch": 0, **m0}]
     torch.save(blob(0, m0["val"]), os.path.join(args.out_dir, "best_head.pt"))
     for ep in range(1, args.epochs + 1):
         tot = nb = 0
@@ -617,10 +635,10 @@ def run_choice(args) -> dict:
         mv = evaluate("val")
         history.append({"epoch": ep, "train_loss": tot / max(1, nb), "val": mv})
         print(f"[choice] epoch {ep} loss {tot/max(1,nb):.4f} val acc {mv['acc']:.4f} "
-              f"soft_ce {mv['soft_ce']:.4f}", flush=True)
+              f"balanced {mv['balanced_acc']:.4f} soft_ce {mv['soft_ce']:.4f}", flush=True)
         torch.save(blob(ep, mv), os.path.join(args.out_dir, "final_head.pt"))
-        if mv["acc"] > best + 1e-9:
-            best, best_ep, bad = mv["acc"], ep, 0
+        if mv[sel] > best + 1e-9:
+            best, best_ep, bad = mv[sel], ep, 0
             torch.save(blob(ep, mv), os.path.join(args.out_dir, "best_head.pt"))
         else:
             bad += 1
@@ -632,11 +650,11 @@ def run_choice(args) -> dict:
     with torch.no_grad():
         logit_scale.copy_(best_ck["logit_scale"].to(device))
     mt = evaluate("test")
-    print(f"[choice] best epoch {best_ep}: val acc {best:.4f} | TEST acc {mt['acc']:.4f} "
-          f"(init {m0['test']['acc']:.4f}, majority {base['majority_test']:.4f}) per_question {mt['per_question']}",
-          flush=True)
+    print(f"[choice] best epoch {best_ep}: val {sel} {best:.4f} | TEST acc {mt['acc']:.4f} "
+          f"balanced {mt['balanced_acc']:.4f} (init {m0['test']['acc']:.4f} / {m0['test']['balanced_acc']:.4f}, "
+          f"majority {base['majority_test']:.4f}) recall {mt['recall']}", flush=True)
     json.dump(history, open(os.path.join(args.out_dir, "history.json"), "w"), indent=1)
-    return {"best_epoch": best_ep, "val_acc": best, "test": mt, "init_test": m0["test"], **base,
+    return {"best_epoch": best_ep, f"val_{sel}": best, "test": mt, "init_test": m0["test"], **base,
             "train_questions": n_train}
 
 
@@ -694,6 +712,12 @@ def main() -> None:
     ch = ap.add_argument_group("choice only")
     ch.add_argument("--targets", choices=["soft", "hard"], default="soft",
                     help="train on annotator distributions (soft) or gold labels (hard)")
+    ch.add_argument("--balance", action="store_true",
+                    help="weight examples by inverse gold-label frequency (imbalanced data; infonce loss)")
+    ch.add_argument("--balance-power", type=float, default=1.0,
+                    help="with --balance: weight = frequency ** -power (1 = fully balanced, 0.5 = partial)")
+    ch.add_argument("--select-metric", choices=["acc", "balanced_acc"], default="acc",
+                    help="validation metric for picking the best epoch and early stopping")
     ch.add_argument("--loss", choices=["infonce", "softce"], default="infonce",
                     help="bidirectional in-batch InfoNCE over the batch's distinct option texts (infonce) "
                          "or a softmax over each question's own options (softce)")
