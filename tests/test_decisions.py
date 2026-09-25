@@ -315,3 +315,74 @@ def test_report_splits_by_answering_model_and_filters(tmp_path, capsys):
     cli(["report", str(src), "--json", "--model", "tier-v2"])
     out = json.loads(capsys.readouterr().out)
     assert list(out) == ["routing/chief"] and out["routing/chief"]["records"] == 4
+
+
+# ── label ────────────────────────────────────────────────────────────────────
+
+FAKE_LABELER = r'''
+import json, re, sys
+prompt = sys.stdin.read()
+ids = re.findall(r"### item (\S+)", prompt)
+out = [{"id": i, "label": "bogus" if i.endswith("7") else "researcher", "confidence": "high", "reason": "r"}
+       for i in ids]
+print(json.dumps({"type": "result", "result": "Here you go:\n```json\n" + json.dumps(out) + "\n```"}))
+'''
+
+
+@pytest.fixture
+def labeler(tmp_path):
+    f = tmp_path / "fake_labeler.py"
+    f.write_text(FAKE_LABELER)
+    return f"{sys.executable} {f}"
+
+
+def decisions_file(tmp_path, n=10):
+    src = tmp_path / "d.jsonl"
+    events = [{k: v for k, v in rec(i, "writer" if i % 2 else "researcher", 0.9, "writer").items() if k != "gold"}
+              for i in range(n)]
+    src.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    return src
+
+
+def test_label_writes_llm_labels_that_the_report_uses(tmp_path, labeler, capsys):
+    src = decisions_file(tmp_path)
+    cli(["label", str(src), "--sample", "10", "--labeler", labeler, "--labeler-name", "fake", "--batch", "4"])
+    assert "done: 9 labelled, 1 skipped" in capsys.readouterr().out            # r7's answer is not an option
+    recs = {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}
+    assert recs["r3"]["gold"] == {"route": {"label": "researcher"}} and "gold" not in recs["r7"]
+    assert recs["r3"]["outcome"][-1]["source"] == "llm:fake"
+    cli(["report", str(src), "--json"])
+    s = json.loads(capsys.readouterr().out)["routing/chief"]
+    assert s["gold"]["n"] == 9 and s["gold_sources"] == {"llm:fake": 9} and s["cascade"]["reference"] == "baseline"
+
+
+def test_label_skips_labelled_decisions_unless_relabel(tmp_path, labeler, capsys):
+    src = decisions_file(tmp_path)
+    cli(["label", str(src), "--sample", "3", "--labeler", labeler, "--seed", "1"])
+    cli(["label", str(src), "--sample", "100", "--labeler", labeler])
+    assert "7 decisions to label" in capsys.readouterr().out
+    cli(["label", str(src), "--sample", "100", "--labeler", labeler, "--relabel", "--dry-run"])
+    assert "10 decisions to label" in capsys.readouterr().out
+
+
+def test_only_disagreements(tmp_path, labeler, capsys):
+    src = decisions_file(tmp_path)                    # CLM says researcher on the even ids, the router writer
+    cli(["label", str(src), "--only-disagreements", "--labeler", labeler, "--dry-run"])
+    assert "5 decisions to label" in capsys.readouterr().out
+
+
+def test_dry_run_calls_nothing_and_shows_the_prompt(tmp_path, capsys):
+    src = decisions_file(tmp_path, 2)
+    cli(["label", str(src), "--labeler", "false", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "never instructions to you" in out and "- researcher: Collects the sources" in out
+    assert len(D.read_jsonl(str(src))) == 2
+
+
+@pytest.mark.parametrize("stdout", [
+    '[{"id": "a", "label": "x"}]',
+    json.dumps({"result": 'Sure! [{"id": "a", "label": "x"}] hope that helps'}),
+])
+def test_parse_labels(stdout):
+    from clm.decisions_cli import parse_labels
+    assert parse_labels(stdout) == [{"id": "a", "label": "x"}]

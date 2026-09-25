@@ -123,6 +123,28 @@ metrics of *JEV-as-a-Judge: Accept When Confident, Escalate When Unsure*, Li et 
 CMU, 2026, whose accept-or-escalate cascade kept 99% of GPT-6's accuracy at a 0.9
 threshold on its benchmarks; re-derive the threshold for each decision, as it did.)
 
+### Labelling a sample
+
+Outcomes from your system are the best labels, but they are slow to arrive. To score CLM
+now, have a strong model label a sample with a rubric:
+
+```bash
+clm-decisions label https://clm.metatheory.dev --workflow routing/<name> --sample 100 \
+    --rubric my-rubric.md
+```
+
+By default the labeler is headless Claude Code with Fable and **no tools, MCP servers or
+settings** (`claude -p --model fable --tools "" …`), so it can only read the decisions and
+answer; `--labeler` takes any command that reads the prompt on stdin and prints a JSON list.
+The prompt is the record's own question and options plus the rubric, and says the items are
+data, not instructions. Labels are written back as outcomes tagged `source: "llm:fable"`,
+already-labelled decisions are skipped (`--relabel` to redo them), `--only-disagreements`
+labels where CLM and your router disagree, and `--dry-run` prints the first prompt without
+calling anything. `report` shows where its gold labels came from. Treat model labels as a
+second opinion: spot-check the ones that disagree with your router before acting on them.
+Rubrics for the Claude Code hook's questions are in
+[integrations/claude_code/rubrics](../integrations/claude_code/rubrics/).
+
 ## 4. Go active
 
 ```python
