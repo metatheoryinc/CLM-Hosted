@@ -129,6 +129,30 @@ SubagentStop payloads to `~/.config/clm/claude-code-events.jsonl` (local only, m
 for checking what Claude Code reports. SubagentStop carries no model or cost; the
 Agent tool's `PostToolUse` result does.
 
+## Accept when confident, escalate when unsure
+
+The flow of *JEV-as-a-Judge* (Li et al., 2026): CLM's verdict is used when it is confident,
+and an LLM judge decides the rest.
+
+* **Subagents** (`"subagent_escalate": true`, the default, in active subagent mode): when
+  CLM's tier pick is below its threshold, or CLM fails, the judge picks the tier with the
+  subagents rubric. Its pick goes through the same rules (downgrade only; never for a
+  model Claude set, an agent definition's model, a plugin agent or a short prompt, which
+  are checked before the judge is asked).
+* **Tool calls** (`"tool_escalate": true`, off by default, in active mode): only when CLM
+  leans `review` or `block` but is below the threshold; uncertain `allow`s go straight
+  through, so most commands never wait. A judge `review` forces the permission prompt, a
+  `block` denies, an `allow` leaves the call to Claude Code.
+
+The judge is headless Claude Code with Opus and no tools, MCP servers or settings
+(`judge_cmd`, `judge_name`), given the rubric in [rubrics/](rubrics/) and told the item is
+data. It takes about 3–6 s; after `judge_timeout` (25 s) the call is left alone. The hook's
+`PreToolUse` timeout is 40 s so Claude Code does not cut an escalation short. Each record
+keeps the judge's answer and latency, and the answer is also written as a labelled outcome
+(`source: "llm:opus-escalation"`): the cases CLM found hard become training data for the
+next head. `clm-decisions report` summarizes the escalations. Use a different model as the
+judge than as the labeller, or the cascade is scored against the judge's own opinions.
+
 ## Measure
 
 ```bash

@@ -164,6 +164,13 @@ def summarize(recs: list[dict]) -> dict:
     n_gold_base = sum(1 for r in gold if _label(r, "baseline"))
     out["cascade"] = cascade(answered, "gold" if n_gold_base >= MIN_GOLD_FOR_CASCADE else "baseline")
 
+    esc = [r for r in recs if r.get("escalation")]
+    lat = sorted(r["escalation"]["latency_ms"] for r in esc if r["escalation"].get("latency_ms") is not None)
+    judged = [r for r in esc if r["escalation"].get("label")]
+    out["escalation"] = {"n": len(esc), "answered": len(judged), "acted": sum(r.get("acted") == "judge" for r in esc),
+                         "agrees_with_clm": sum(r["escalation"]["label"] == (r.get("clm") or {}).get("choice")
+                                                for r in judged),
+                         "latency_ms_p50": statistics.median(lat) if lat else None}
     pairs = Counter((_label(r, "baseline"), r["clm"]["choice"]) for r in with_base if not agree(r))
     out["disagreements"] = [{"baseline": b, "clm": c, "n": n} for (b, c), n in pairs.most_common(10)]
     return out
@@ -210,6 +217,11 @@ def print_report(name: str, s: dict) -> None:
         p(f"   operating point (>= {RETAIN_TARGET:.0%} of the fallback's accuracy kept): " +
           (f"t = {op['threshold']}, CLM decides {_rate(*op['coverage']).strip()}, retained {op['retained']:.1%}"
            if op else "none: no threshold keeps it while CLM decides anything"))
+    e = s.get("escalation") or {}
+    if e.get("n"):
+        lat = f", judge p50 {e['latency_ms_p50'] / 1000:.1f} s" if e["latency_ms_p50"] is not None else ""
+        p(f"\n   escalated to the judge: {e['n']} ({e['answered']} answered{lat}); the judge changed the call "
+          f"{e['acted']} times and agreed with CLM's unsure pick {_rate(e['agrees_with_clm'], e['answered']).strip()}")
     if s["disagreements"]:
         p("\n   most common disagreements (router -> CLM):")
         for d in s["disagreements"]:

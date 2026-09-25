@@ -378,3 +378,105 @@ def test_a_clipped_state_still_matches_the_labelers_skip_pattern():
     from clm.decisions_cli import CLIPPED
     s = hook.describe_input({"command": "x" * 20000})
     assert re.search(CLIPPED, s)
+
+
+# ── accept when confident, escalate when unsure ──────────────────────────────
+
+FAKE_JUDGE = r'''
+import json, os, sys, time
+prompt = sys.stdin.read()
+with open(os.environ["FAKE_JUDGE_LOG"], "a") as f:
+    f.write(json.dumps({"prompt": prompt[:200]}) + "\n")
+time.sleep(float(os.environ.get("FAKE_JUDGE_SLEEP", "0")))
+ans = {"label": os.environ["FAKE_JUDGE_LABEL"], "confidence": "high", "reason": "fake"}
+print(json.dumps({"type": "result", "result": "```json\n" + json.dumps(ans) + "\n```"}))
+'''
+
+
+@pytest.fixture
+def fake_judge(tmp_path):
+    f = tmp_path / "judge.py"
+    f.write_text(FAKE_JUDGE)
+    log = tmp_path / "judge.log"
+
+    def calls():
+        return len(log.read_text().splitlines()) if log.exists() else 0
+    return {"cmd": f"{sys.executable} {f}", "log": str(log), "calls": calls}
+
+
+UNSURE = {"haiku": 0.40, "sonnet": 0.35, "opus": 0.25}
+
+
+def esc_run(run, fake_judge, event, probs, label, extra=None, sleep="0"):
+    cfg = {**ACTIVE, "judge_cmd": fake_judge["cmd"], "judge_name": "fake", **(extra or {})}
+    return run(event, probs=probs, extra=cfg,
+               env_extra={"FAKE_JUDGE_LABEL": label, "FAKE_JUDGE_LOG": fake_judge["log"], "FAKE_JUDGE_SLEEP": sleep})
+
+
+def test_confident_subagent_picks_never_reach_the_judge(run, fake_judge):
+    p, _, _ = esc_run(run, fake_judge, agent_call(tid="toolu_e1"), SONNET, "haiku")
+    assert json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+    assert fake_judge["calls"]() == 0
+
+
+def test_uncertain_subagent_picks_are_escalated(run, fake_judge):
+    p, _, clm = esc_run(run, fake_judge, agent_call(tid="toolu_e2"), UNSURE, "haiku")
+    assert json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "haiku"
+    assert fake_judge["calls"]() == 1
+    got = clm.wait(3)
+    sub = next(r for r in got if r.get("workflow") == "routing/claude-code-subagents")
+    assert sub["acted"] == "judge" and sub["meta"]["why"] == "judge (fake): opus -> haiku"
+    assert sub["escalation"]["label"] == "haiku" and sub["escalation"]["latency_ms"] >= 0
+    out = next(e for e in got if e.get("event") == "outcome" and e["id"] == "toolu_e2:model")
+    assert (out["label"], out["source"]) == ("haiku", "llm:fake-escalation")
+
+
+def test_a_judge_that_says_opus_changes_nothing(run, fake_judge):
+    p, _, _ = esc_run(run, fake_judge, agent_call(tid="toolu_e3"), UNSURE, "opus")
+    assert p.stdout == "" and fake_judge["calls"]() == 1
+
+
+@pytest.mark.parametrize("event", [agent_call(model="opus", tid="toolu_e4"),
+                                   agent_call(tid="toolu_e5", prompt="short")])
+def test_untouchable_calls_never_reach_the_judge(run, fake_judge, event):
+    p, _, _ = esc_run(run, fake_judge, event, UNSURE, "haiku", extra={"subagent_min_prompt_chars": 1000})
+    assert p.stdout == "" and fake_judge["calls"]() == 0
+
+
+def test_a_slow_judge_leaves_the_call_alone(run, fake_judge):
+    p, took, clm = esc_run(run, fake_judge, agent_call(tid="toolu_e6"), UNSURE, "haiku",
+                           extra={"judge_timeout": 0.5}, sleep="3")
+    assert p.stdout == "" and took < 2.5
+    sub = next(r for r in clm.wait(2) if r.get("workflow") == "routing/claude-code-subagents")
+    assert "TimeoutExpired" in sub["escalation"]["error"] and sub["acted"] == "baseline"
+
+
+LEANS_REVIEW = {"allow": 0.30, "review": 0.60, "block": 0.10}
+
+
+def test_tool_escalation_is_off_by_default(run, fake_judge):
+    p, _, _ = run(pre(tid="toolu_t1"), mode="active", probs=LEANS_REVIEW, extra={"judge_cmd": fake_judge["cmd"]},
+                  env_extra={"FAKE_JUDGE_LABEL": "review", "FAKE_JUDGE_LOG": fake_judge["log"]})
+    assert p.stdout == "" and fake_judge["calls"]() == 0
+
+
+@pytest.mark.parametrize("label, decision", [("review", "ask"), ("block", "deny"), ("allow", None)])
+def test_uncertain_tool_calls_leaning_risky_are_escalated_when_enabled(run, fake_judge, label, decision):
+    p, _, clm = run(pre(tid=f"toolu_t2{label}"), mode="active", probs=LEANS_REVIEW,
+                    extra={"judge_cmd": fake_judge["cmd"], "judge_name": "fake", "tool_escalate": True},
+                    env_extra={"FAKE_JUDGE_LABEL": label, "FAKE_JUDGE_LOG": fake_judge["log"]})
+    assert fake_judge["calls"]() == 1
+    if decision:
+        out = json.loads(p.stdout)["hookSpecificOutput"]
+        assert out["permissionDecision"] == decision and "escalation judge (fake)" in out["permissionDecisionReason"]
+    else:
+        assert p.stdout == ""
+    rec = next(r for r in clm.wait(2) if r.get("workflow") == "routing/claude-code-tools")
+    assert rec["escalation"]["label"] == label and rec["acted"] == ("judge" if decision else "baseline")
+
+
+def test_uncertain_allows_are_not_escalated(run, fake_judge):
+    run(pre(tid="toolu_t3"), mode="active", probs={"allow": 0.5, "review": 0.3, "block": 0.2},
+        extra={"judge_cmd": fake_judge["cmd"], "tool_escalate": True},
+        env_extra={"FAKE_JUDGE_LABEL": "review", "FAKE_JUDGE_LOG": fake_judge["log"]})
+    assert fake_judge["calls"]() == 0
