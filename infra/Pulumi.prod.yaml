@@ -6,8 +6,10 @@ config:
   clm-hosted:clmApiKey:
     secure: AAABAOxC7bG9WUvDq2UV7Y7ArlV5Vb6w1wWXAEllBw932alnN0usKgYxa6ROpSD4zQKKTZlueRPo4dhmw7+N+wVk9MMom4ZF1FSIOBhZXc632RA3CdQy4YUEN3T2H/fe
   clm-hosted:agentKeys:
-    secure: AAABALP3OO+3aRUA54rSvgqQPV1wP/aE4T+ySX10LckWdO+yiuaIa2UsQwSkD9MsWOqWN+desLB1pGEc+Wmvio6KCaJjkoqC0NRQgfdvcDT64e1lPcH8D55mCfK+ZFg71OX9dEruth85xnHGGXHG
+    secure: AAABAPTeBtLWUR1cEecBCCU0IWEUHtxeeX+0mEQxaJLAVv+XM/dhTkFMQ4aHHj1VX1b3mTqNuZ7mT412JF9Hq9dNvRZIjwtOQfTX+HMMtSc5BAY+YbakMc8I9B+TIGvILHGa19g6k1r2c0JCEBnaTryCefOzu8L9qDQ5gdfTdwoW/VniZR2Ij1yCTa16MiAlnIY5KDigYpe2mY87x/pOc3lgrBdB3v5OD2hjFHvdXG6azUdBR/8bJ9MdmJE=
   clm-hosted:registryAuthId: cmuddk8gr003psxunmobd4qxd
   clm-hosted:cloudflareAccountId: daa733811c7150ec3148993b991a2400
   clm-hosted:cloudflareZoneId: f8a3822c528b323b90dc68789244791e
   clm-hosted:imageTag: 126a4200ebb6e142b12f0231efef07f743c81ae0
+  clm-hosted:adminAgents:
+    - admin
