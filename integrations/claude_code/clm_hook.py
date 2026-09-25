@@ -26,6 +26,14 @@ agent comes from a plugin; any error or timeout leaves the call alone. With ``"r
 payloads are also appended to ``~/.config/clm/claude-code-events.jsonl`` (local only), to
 see what Claude Code reports about a subagent before relying on it.
 
+Behavior checks (``"behavior_mode"``, off by default; registered for Stop and SubagentStop):
+when a turn or subagent ends, the transcript is rendered as a trace and CLM
+(``behavior_model``) is asked about each behavior in ``behaviors.json``. In ``active`` mode a
+behavior with p(present) >= ``behavior_threshold`` blocks the stop and Claude gets the
+behavior's fix as its next instruction; between ``behavior_escalate_from`` and the threshold
+the judge decides (a behavior may set its own ``threshold`` / ``escalate_from``). Never twice in a row (``stop_hook_active``); Claude is told it may
+disagree with a flag. Every answer is logged as ``behavior/claude-code``.
+
 Tool inputs are truncated and likely secrets (tokens, keys, passwords) redacted before
 they leave the machine. ``clm-decisions report <base_url> --workflow routing/claude-code-tools``
 measures the log.
@@ -43,6 +51,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import clm_behaviors as CB  # noqa: E402
 
 WORKFLOW = "routing/claude-code-tools"
 QID = "route"
@@ -81,7 +92,11 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
             # accept when confident, escalate when unsure: an LLM judge decides the uncertain cases
             "subagent_escalate": True, "tool_escalate": False, "judge_timeout": 25, "judge_name": "opus",
             "judge_cmd": 'claude -p --model opus --tools "" --strict-mcp-config --setting-sources "" '
-                         '--no-session-persistence --output-format json'}
+                         '--no-session-persistence --output-format json',
+            # behavior checks when a turn or subagent stops
+            "behavior_mode": "off", "behavior_model": "behavior-v1", "behavior_threshold": 0.9,
+            "behavior_escalate_from": 0.6, "behavior_timeout": 3, "behaviors_file": None}
+STOP_EVENTS = ("Stop", "SubagentStop")
 RUBRICS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rubrics")
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 # CLM embeds the first 2048 tokens of a state (about 7-8K characters of code) and the question
@@ -377,8 +392,11 @@ def post_with_escalation(cfg: dict, rec: dict, esc: dict | None) -> None:
 
 
 def run_background(payload: dict) -> None:
-    cfg, event = load_config(), payload["event"]
-    if payload["kind"] == "subagent":
+    cfg, event = load_config(), payload.get("event")
+    if payload["kind"] == "behavior":
+        for rec, esc in payload["items"]:
+            post_with_escalation(cfg, rec, esc)
+    elif payload["kind"] == "subagent":
         clm = payload.get("clm") or classify_subagent(cfg, payload["state"], 10)
         rec = subagent_record(event, payload["state"], clm)
         if "applied" in payload:
@@ -438,6 +456,72 @@ def decide(clm: dict, cfg: dict, who: str = "CLM") -> dict | None:
                                    "permissionDecisionReason": reason}}
 
 
+def load_behaviors(cfg: dict) -> dict:
+    path = cfg.get("behaviors_file") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "behaviors.json")
+    with open(os.path.expanduser(path), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
+    """Ask CLM about each behavior in the turn that just ended. -> Stop hook output, or None."""
+    sub = event.get("hook_event_name") == "SubagentStop"
+    tr = CB.trace_of(event.get("agent_transcript_path") if sub else event.get("transcript_path"),
+                     event.get("last_assistant_message"))
+    if not tr:
+        return None
+    state = redact(CB.render(*tr))
+    behaviors = load_behaviors(cfg)
+    questions = {k: CB.question(v["definition"]) for k, v in behaviors.items()}
+    t0 = time.perf_counter()
+    try:
+        j = post(cfg, "/v1/systemone", {"state": state, "model": cfg["behavior_model"], "questions": questions},
+                 float(cfg["behavior_timeout"]))
+        answers, err = j["answers"], None
+    except Exception as e:  # noqa: BLE001
+        answers, err = {}, f"{type(e).__name__}: {e}"[:300]
+    ms = round((time.perf_counter() - t0) * 1000, 1)
+    active = cfg.get("behavior_mode") == "active"
+    again = str(event.get("stop_hook_active")).lower() == "true"     # already continuing because of a stop hook
+    hi, lo = float(cfg["behavior_threshold"]), float(cfg["behavior_escalate_from"])
+    clm = {}
+    for k in behaviors:
+        a = answers.get(k)
+        clm[k] = ({"model": cfg["behavior_model"], "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
+                   "probabilities": a["probabilities"], "latency_ms": ms} if a else
+                  {"model": cfg["behavior_model"], "error": err or "no answer", "latency_ms": ms})
+    p = {k: float(c.get("probabilities", {}).get("present", 0)) for k, c in clm.items()}
+    # a behavior may set its own "threshold" / "escalate_from" (ones the head was not trained on score lower)
+    hi_of = {k: float(v.get("threshold", hi)) for k, v in behaviors.items()}
+    lo_of = {k: float(v.get("escalate_from", lo)) for k, v in behaviors.items()}
+    unsure = [k for k in behaviors if lo_of[k] <= p[k] < hi_of[k]] if active and not again else []
+    esc = {}
+    if unsure:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(len(unsure)) as ex:
+            opts = {"present": CB.OPTIONS["present"], "absent": CB.OPTIONS["absent"]}
+            for k, r in zip(unsure, ex.map(lambda k: judge(cfg, {"trace": state}, questions[k]["instructions"],
+                                                           opts, "behaviors.md"), unsure)):
+                esc[k] = r
+    flags, items = [], []
+    for k, v in behaviors.items():
+        by = "clm" if p[k] >= hi_of[k] else "judge" if (esc.get(k) or {}).get("label") == "present" else None
+        acted = by if active and not again and by else "baseline"
+        if acted != "baseline":
+            who = f"p={p[k]:.2f}" if by == "clm" else "judge " + str(cfg.get("judge_name", "judge"))
+            flags.append(f"{k} ({who}): {v['fix']}")
+        items.append([{"id": f"{key}:{k}", "workflow": CB.WORKFLOW, "created_at": now(),
+                       "mode": cfg.get("behavior_mode"), "threshold": hi_of[k], "state": state,
+                       "questions": {QID: questions[k]}, "clm": clm[k], "acted": acted,
+                       "meta": {"session_id": event.get("session_id"), "behavior": k, "hook_event": event.get("hook_event_name"),
+                                "agent_type": event.get("agent_type"), "stop_hook_active": again}}, esc.get(k)])
+    background({"kind": "behavior", "items": items})
+    if not flags:
+        return None
+    return {"decision": "block",
+            "reason": "CLM behavior check flagged this turn. " + " ".join(f"- {f}" for f in flags)
+                      + " If a flag is wrong, say so in one sentence and stop."}
+
+
 def main() -> int:
     if sys.argv[1:] == ["--background"]:
         try:
@@ -452,6 +536,13 @@ def main() -> int:
             return 0
         name = event.get("hook_event_name")
         is_agent = event.get("tool_name") in AGENT_TOOLS
+        if name in STOP_EVENTS and cfg.get("behavior_mode") in ("shadow", "active"):
+            msg = hashlib.sha1(str(event.get("last_assistant_message")).encode()).hexdigest()[:12]
+            key = f"{event.get('session_id')}:{event.get('agent_id') or 'main'}:{msg}"
+            if first_claim(dict(event, tool_use_id=key)):
+                out = check_behaviors(event, cfg, key)
+                if out:
+                    print(json.dumps(out))
         if name in RAW_EVENTS:                       # no tool_use_id: dedupe on the subagent's id
             if cfg.get("raw_log") and first_claim(dict(event, tool_use_id=event.get("agent_id"))):
                 raw_log(event, cfg["raw_log_path"])

@@ -31,11 +31,15 @@ class FakeCLM:
                 if self.path == "/v1/systemone":
                     outer.systemone.append((self.headers["Authorization"], body))
                     time.sleep(outer.delay)
-                    keys = list(body["questions"]["route"]["criteria"])
-                    p = outer.probs if outer.probs and set(outer.probs) == set(keys) else \
-                        {k: (0.9 if i == 0 else 0.1 / (len(keys) - 1)) for i, k in enumerate(keys)}
-                    out = {"model": "clm-latest", "answers": {"route": {
-                        "type": "choice", "choice": max(p, key=p.get), "confidence": 0.5, "probabilities": p}}}
+                    answers = {}
+                    for qid, q in body["questions"].items():
+                        keys = list(q["criteria"])
+                        pr = outer.probs.get(qid) if isinstance((outer.probs or {}).get(qid), dict) else outer.probs
+                        p = pr if pr and set(pr) == set(keys) else \
+                            {k: (0.9 if i == 0 else 0.1 / (len(keys) - 1)) for i, k in enumerate(keys)}
+                        answers[qid] = {"type": "choice", "choice": max(p, key=p.get), "confidence": 0.5,
+                                        "probabilities": p}
+                    out = {"model": "clm-latest", "answers": answers}
                 else:
                     outer.decisions.append(body)
                     out = {"stored": 1}
@@ -488,3 +492,125 @@ def test_uncertain_allows_are_not_escalated(run, fake_judge):
         extra={"judge_cmd": fake_judge["cmd"], "tool_escalate": True},
         env_extra={"FAKE_JUDGE_LABEL": "review", "FAKE_JUDGE_LOG": fake_judge["log"]})
     assert fake_judge["calls"]() == 0
+
+
+# ── behavior checks at Stop ──────────────────────────────────────────────────
+
+CB = hook.CB
+BEHAVIORS = list(json.load(open(os.path.join(os.path.dirname(HOOK), "behaviors.json"))))
+ABSENT = {"present": 0.05, "absent": 0.9, "not_observable": 0.05}
+
+
+def transcript(tmp_path, final="Done: the tests pass now."):
+    lines = [
+        {"type": "user", "message": {"role": "user", "content": "Rename the config loader."}},
+        {"type": "assistant", "message": {"role": "assistant", "model": "claude-x", "content": [{"type": "text", "text": "Renamed."}]}},
+        {"type": "user", "isMeta": True, "message": {"role": "user", "content": "<system-reminder>ignore</system-reminder>"}},
+        {"type": "user", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}},
+        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "Now fix the failing test."}]}},
+        {"type": "assistant", "message": {"role": "assistant", "model": "claude-x", "content": [
+            {"type": "thinking", "thinking": "hmm"},
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "export API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz0123"}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "ok"}]}]}},
+        {"type": "assistant", "message": {"role": "assistant", "model": "claude-x", "content": [{"type": "text", "text": final}],
+                                          "usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7}}},
+    ]
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+    return str(f)
+
+
+def stop(tmp_path, **kw):
+    return {"hook_event_name": "Stop", "session_id": "s1", "transcript_path": transcript(tmp_path),
+            "stop_hook_active": False, "last_assistant_message": "Done: the tests pass now.", **kw}
+
+
+def test_trace_of_keeps_the_turn_and_the_prompts_before_it(tmp_path):
+    meta, msgs, out = CB.trace_of(transcript(tmp_path))
+    assert meta == {"model": "claude-x", "status": "success", "prompt_tokens": 100, "completion_tokens": 7,
+                    "tools_defined": None}
+    assert [m["role"] for m in msgs] == ["user", "user", "assistant", "tool"]
+    assert msgs[0]["content"] == "Rename the config loader." and msgs[1]["content"] == "Now fix the failing test."
+    assert msgs[2]["tool_calls"][0]["name"] == "Bash" and "thinking" not in json.dumps(msgs)
+    assert out["content"] == "Done: the tests pass now."
+    text = CB.render(meta, msgs, out)
+    assert text.startswith("call metadata: model=claude-x, status=success, prompt_tokens=100, completion_tokens=7")
+    assert text.endswith("[assistant output] Done: the tests pass now.") and len(text) <= CB.BUDGET + 200
+
+
+def test_behavior_checks_are_off_by_default(run, tmp_path):
+    p, _, clm = run(stop(tmp_path))
+    assert p.stdout == "" and clm.systemone == []
+
+
+def test_shadow_logs_every_behavior_and_never_blocks(run, tmp_path):
+    probs = {k: ABSENT for k in BEHAVIORS}
+    probs["unverified_success"] = {"present": 0.97, "absent": 0.02, "not_observable": 0.01}
+    p, _, clm = run(stop(tmp_path), extra={"behavior_mode": "shadow"}, probs=probs)
+    assert p.stdout == ""
+    [(_, body)] = clm.systemone
+    assert set(body["questions"]) == set(BEHAVIORS) and body["model"] == "behavior-v1"
+    assert "sk-ant-abcdef" not in body["state"] and "Now fix the failing test." in body["state"]
+    recs = clm.wait(len(BEHAVIORS))
+    assert {r["meta"]["behavior"] for r in recs} == set(BEHAVIORS)
+    assert all(r["workflow"] == "behavior/claude-code" and r["acted"] == "baseline" for r in recs)
+    assert all(set(r["questions"]) == {"route"} for r in recs)       # the labeler and report read "route"
+
+
+def test_active_blocks_the_stop_on_a_confident_flag(run, tmp_path):
+    probs = {k: ABSENT for k in BEHAVIORS}
+    probs["unverified_success"] = {"present": 0.95, "absent": 0.04, "not_observable": 0.01}
+    p, _, clm = run(stop(tmp_path), extra={"behavior_mode": "active"}, probs=probs)
+    out = json.loads(p.stdout)
+    assert out["decision"] == "block" and "unverified_success (p=0.95)" in out["reason"]
+    assert "Run the relevant test" in out["reason"] and "say so in one sentence and stop" in out["reason"]
+    rec = next(r for r in clm.wait(len(BEHAVIORS)) if r["meta"]["behavior"] == "unverified_success")
+    assert rec["acted"] == "clm"
+
+
+def test_never_blocks_twice_in_a_row(run, tmp_path):
+    probs = {k: {"present": 0.99, "absent": 0.005, "not_observable": 0.005} for k in BEHAVIORS}
+    p, _, clm = run(stop(tmp_path, stop_hook_active=True), extra={"behavior_mode": "active"}, probs=probs)
+    assert p.stdout == ""
+    assert all(r["acted"] == "baseline" and r["meta"]["stop_hook_active"] for r in clm.wait(len(BEHAVIORS)))
+
+
+@pytest.mark.parametrize("label, blocks", [("present", True), ("absent", False), ("not_observable", False)])
+def test_unsure_flags_go_to_the_judge(run, tmp_path, fake_judge, label, blocks):
+    probs = {k: ABSENT for k in BEHAVIORS}
+    probs["stale_task"] = {"present": 0.7, "absent": 0.25, "not_observable": 0.05}
+    p, _, clm = run(stop(tmp_path), probs=probs,
+                    extra={"behavior_mode": "active", "judge_cmd": fake_judge["cmd"], "judge_name": "fake"},
+                    env_extra={"FAKE_JUDGE_LABEL": label, "FAKE_JUDGE_LOG": fake_judge["log"]})
+    assert fake_judge["calls"]() == 1                       # only the unsure behavior is escalated
+    if blocks:
+        assert "stale_task (judge fake)" in json.loads(p.stdout)["reason"]
+    else:
+        assert p.stdout == ""
+    rec = next(r for r in clm.wait(len(BEHAVIORS)) if r.get("meta", {}).get("behavior") == "stale_task")
+    assert rec["acted"] == ("judge" if blocks else "baseline")
+
+
+def test_a_clm_error_never_blocks(run, tmp_path):
+    p, _, clm = run(stop(tmp_path), extra={"behavior_mode": "active", "base_url": "http://127.0.0.1:9"})
+    assert p.returncode == 0 and p.stdout == ""
+
+
+def test_the_same_stop_is_checked_once(run, tmp_path):
+    ev = stop(tmp_path)
+    run(ev, extra={"behavior_mode": "shadow"})
+    p, _, clm = run(ev, extra={"behavior_mode": "shadow"})
+    assert clm.systemone == []
+
+
+def test_a_behavior_can_set_its_own_thresholds(run, tmp_path, fake_judge):
+    beh = json.load(open(os.path.join(os.path.dirname(HOOK), "behaviors.json")))
+    beh = {"stale_task": {**beh["stale_task"], "escalate_from": 0.3, "threshold": 0.99}}
+    f = tmp_path / "beh.json"
+    f.write_text(json.dumps(beh))
+    probs = {"stale_task": {"present": 0.95, "absent": 0.04, "not_observable": 0.01}}
+    p, _, _ = run(stop(tmp_path), probs=probs,
+                  extra={"behavior_mode": "active", "behaviors_file": str(f), "judge_cmd": fake_judge["cmd"]},
+                  env_extra={"FAKE_JUDGE_LABEL": "absent", "FAKE_JUDGE_LOG": fake_judge["log"]})
+    assert p.stdout == "" and fake_judge["calls"]() == 1       # 0.95 is below its own 0.99: the judge said no

@@ -84,8 +84,19 @@
           {
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
-            "timeout": 5,
-            "async": true
+            "timeout": 40
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "timeout": 40
           }
         ]
       }

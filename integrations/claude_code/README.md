@@ -49,10 +49,11 @@ with code 2, which Claude Code treats as "block the tool call", in every session
 "command": "f=\"/path/to/CLM-Hosted/integrations/claude_code/clm_hook.py\"; [ -f \"$f\" ] && python3 \"$f\"; exit 0"
 ```
 
-Register it for the same seven events as this repo's
-[.claude/settings.json](../../.claude/settings.json) (`matcher: ""`, `timeout: 5`,
-`async: true` on all but `PreToolUse`: PermissionRequest, PermissionDenied,
-PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop). In this repo both registrations fire; the
+Register it for the same eight events as this repo's
+[.claude/settings.json](../../.claude/settings.json) (`matcher: ""`; `timeout: 40` and not
+async for `PreToolUse`, `Stop` and `SubagentStop`, which may block; `timeout: 5`,
+`async: true` for PermissionRequest, PermissionDenied, PostToolUse, PostToolUseFailure
+and SubagentStart). In this repo both registrations fire; the
 hook handles each event once and the second copy exits.
 
 ## Subagent model tiers
@@ -155,6 +156,39 @@ keeps the judge's answer and latency, and the answer is also written as a labell
 next head. `clm-decisions report` summarizes the escalations. Use a different model as the
 judge than as the labeller, or the cascade is scored against the judge's own opinions.
 
+## Behavior checks when a turn ends
+
+With `"behavior_mode": "shadow"` or `"active"` (off by default), each time Claude Code
+finishes a turn (`Stop`) or a subagent finishes (`SubagentStop`), the hook renders the turn
+as a trace and asks CLM (`behavior_model`, default `behavior-v1`) about every behavior in
+[behaviors.json](behaviors.json), in one request (about 0.5 s):
+
+| behavior | flags a turn where |
+|---|---|
+| `unverified_success` | the reply says it works or tests pass, but nothing checked it after the last change |
+| `stale_task` | the user redirected the task and the work continued on the old one |
+| `truncation_ignored` | a truncated or capped tool output was relied on as if complete |
+| `repeat_ask` | the reply asks for something the user already gave |
+
+In **active** mode a behavior with p(present) >= `behavior_threshold` (0.9) blocks the stop:
+Claude gets that behavior's `fix` as its next instruction, plus "if a flag is wrong, say so
+in one sentence and stop". Between `behavior_escalate_from` (0.6) and the threshold the
+judge decides, as for subagents (about 5 s, only then). A behavior may set its own
+`threshold` / `escalate_from` in the file; `unverified_success` escalates from 0.45 because
+it is our own definition and scores lower than the benchmark's. It never blocks twice in a
+row (`stop_hook_active`), and any error or timeout (`behavior_timeout`, 3 s) lets the stop
+through. Edit the file (or point `behaviors_file` at your own) to add or drop behaviors: a
+definition in the benchmark's "Include: … / Exclude: …" style reads best.
+
+The trace is what [evaluation/behavior_eval.py](../../evaluation/behavior_eval.py) trained
+`behavior-v1` on: model and token counts, the last two user prompts before this turn, the
+turn's messages and tool calls (as many of the latest as fit in 5600 characters) and the final
+reply, secrets redacted. On the Respan behavior benchmark's held-out traces, `behavior-v1` has
+F1 0.66 on `present` (Jev 0.715, Span-01 0.843) and 86% precision at p >= 0.9; behaviors that
+depend on the middle of a long turn are its weak spot. Every answer is logged as
+`behavior/claude-code` (and the judge's answers as labels), so
+`clm-decisions report … --workflow behavior/claude-code` and `clm-decisions label` work on it.
+
 ## Measure
 
 ```bash
@@ -185,4 +219,5 @@ GitHub, OpenAI, Slack, AWS and Google keys, private key blocks and long hex stri
 Redaction is best effort: don't opt in on a machine where tool calls carry secrets
 these patterns would miss. Records are stored in the stack's D1 database under your
 agent key; the transcript path and file contents beyond the clipped arguments are
-never sent.
+never sent. With behavior checks on, each turn's rendered trace (up to 5600 characters of
+prompts, messages, tool calls and results, redacted the same way) is also sent and stored.

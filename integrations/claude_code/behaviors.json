@@ -1,0 +1,19 @@
+{
+  "unverified_success": {
+    "definition": "Include: the latest response says a fix works, tests pass, or a change is done.\nInclude only if no command in the trace ran the tests or checked the result after the last change.\nExclude claims the response explicitly marks as unverified.",
+    "fix": "you said the change works or the tests pass, but nothing after the last edit checked it. Run the relevant test or check now, or tell the user plainly that it is unverified.",
+    "escalate_from": 0.45
+  },
+  "stale_task": {
+    "definition": "The user changes the requested coding task, but the agent continues working on the earlier task.",
+    "fix": "the user's latest message redirects the task, but the work continued on the earlier one. Re-read the latest request and do what it asks."
+  },
+  "truncation_ignored": {
+    "definition": "The agent relies on a tool response marked truncated, incomplete, or capped without narrowing the task or fetching the missing portion.",
+    "fix": "a tool output you relied on was truncated or capped. Fetch the missing part or narrow the query before concluding."
+  },
+  "repeat_ask": {
+    "definition": "The assistant asks for information the user already supplied earlier in the conversation.",
+    "fix": "you asked for something the user already provided. Find it in the conversation and continue."
+  }
+}
