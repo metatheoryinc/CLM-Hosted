@@ -13,47 +13,51 @@ of [docs/ROUTING.md](../../docs/ROUTING.md): shadow first, measure, then let CLM
   Claude. CLM never approves anything, so it can only make Claude Code stricter; on
   any error or after `timeout` (1.5 s) the call goes to Claude Code as usual.
 
-The hook is registered in this repo's [.claude/settings.json](../../.claude/settings.json)
-and does nothing until you install it (below).
+It installs as a Claude Code plugin (below) and does nothing until you install it.
 
 ## Install
 
-You need a clone of this repo and the agent key (ask whoever runs the
-[infra](../../infra/README.md) stack). Then, from the clone:
+It is a Claude Code plugin; this repo is its marketplace. You need the agent key (ask
+whoever runs the [infra](../../infra/README.md) stack).
 
 ```bash
-python3 integrations/claude_code/install.py
-```
-
-It asks for the key (or reads `--key` / `CLM_API_KEY`), registers the hook in
-`~/.claude/settings.json` for every event it handles, pointing at this clone, and writes
-`~/.config/clm/claude-code.json` (mode 600) with the defaults: **subagent model downgrades
-and behavior checks active, tool calls in shadow**. New sessions use it. Re-run it after a
-`git pull` to update the hooks; settings you changed in the config file are kept.
-
-```bash
-python3 integrations/claude_code/install.py status
+claude plugin marketplace add metatheoryinc/CLM-Hosted
 ```
 
 ```bash
-python3 integrations/claude_code/install.py uninstall
+claude plugin install clm@clm-hosted
 ```
 
-`uninstall` removes only this hook's entries (a timestamped backup of `settings.json` is
-kept) and sets the config to `"mode": "off"`, which also silences the copy registered in
-this repo's own [.claude/settings.json](../../.claude/settings.json); `--purge` deletes the
-config and the key in it. For one session only: `CLM_HOOK_MODE=off claude`. `--shadow` at
-install logs everything and changes nothing.
+Claude Code asks for the plugin's settings when it is enabled (or later under `/plugin` →
+`clm` → configure): the **agent key**, stored in your keychain, and three switches:
 
-What active means for you: a subagent Claude would run on Opus may run on Sonnet or Haiku
-when CLM is confident the task does not need it; at the end of a turn Claude may be told to
-verify or fix something (see [Behavior checks](#behavior-checks-when-a-turn-ends)); unsure
-cases ask Opus (`claude -p`, on your own account, a few seconds, only then). Any CLM error
-or timeout leaves Claude Code as it was.
+| setting | default | on | off |
+|---|---|---|---|
+| Cheaper subagent models | on | a subagent CLM is confident needs less runs on a cheaper model | log only |
+| Behavior checks | on | Claude may be asked to verify or fix something when a turn ends | log only |
+| Tool-call gate | off | a confident review/block forces the permission prompt or denies the call | log only |
 
-To change the settings by hand, edit the config file; the keys are in `DEFAULTS` at the top
-of [clm_hook.py](clm_hook.py). If the clone moves or is deleted the hook does nothing (the
-registered command checks the file exists first), rather than blocking every tool call.
+New sessions use it. In a session:
+
+* `/clm:status`: the modes and what CLM changed recently (downgrades, flags, blocked calls).
+* `/clm:off` / `/clm:on`: pause or resume it in every session on this machine.
+* `/plugin`: disable, update or uninstall it. `claude plugin update clm@clm-hosted` gets the
+  latest version.
+
+Whenever CLM changes something, a one-line `CLM: …` notice says what and why. Unsure cases
+ask Opus (`claude -p`, on your own account, a few seconds, only then). Any CLM error or
+timeout leaves Claude Code as it was.
+
+Thresholds, models and the rest are in `DEFAULTS` / `PLUGIN_DEFAULTS` at the top of
+[clm_hook.py](clm_hook.py); to tune them, put the keys in `~/.config/clm/claude-code.json`
+(the plugin's own settings still win for the key and the three switches).
+`CLM_HOOK_MODE=off claude` turns it off for one session.
+
+To try a local checkout instead of the published plugin:
+
+```bash
+claude --plugin-dir integrations/claude_code
+```
 
 ## Subagent model tiers
 
@@ -157,7 +161,7 @@ judge than as the labeller, or the cascade is scored against the judge's own opi
 
 ## Behavior checks when a turn ends
 
-With `"behavior_mode": "shadow"` or `"active"` (off by default), each time Claude Code
+With behavior checks on (the plugin's default; `"behavior_mode"` in the config file), each time Claude Code
 finishes a turn (`Stop`) or a subagent finishes (`SubagentStop`), the hook renders the turn
 as a trace and asks CLM (`behavior_model`, default `behavior-v1`) about every behavior in
 [behaviors.json](behaviors.json), in one request (about 0.5 s):

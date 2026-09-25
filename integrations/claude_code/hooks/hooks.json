@@ -6,7 +6,31 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
+            "timeout": 40
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
+            "timeout": 40
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 40
           }
         ]
@@ -18,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 5,
             "async": true
           }
@@ -31,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 5,
             "async": true
           }
@@ -44,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 5,
             "async": true
           }
@@ -57,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 5,
             "async": true
           }
@@ -70,33 +94,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/clm_hook.py\"",
             "timeout": 5,
             "async": true
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
-            "timeout": 40
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/integrations/claude_code/clm_hook.py",
-            "timeout": 40
           }
         ]
       }

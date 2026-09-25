@@ -2,8 +2,9 @@
 """Claude Code hook: CLM classifies every tool call as allow / review / block, and
 every subagent task by the model tier it needs (haiku / sonnet / opus).
 
-Standard library only. Registered for PreToolUse, PermissionRequest, PermissionDenied,
-PostToolUse and PostToolUseFailure (see .claude/settings.json); off unless configured:
+Standard library only. Installed as the ``clm`` Claude Code plugin (hooks/hooks.json registers
+it for every event it handles; the plugin's settings arrive as CLAUDE_PLUGIN_OPTION_* and
+turn it on), or configured by hand:
 
     ~/.config/clm/claude-code.json   (or $CLM_HOOK_CONFIG)
     {"mode": "shadow", "base_url": "https://clm.metatheory.dev", "api_key": "<agent key>"}
@@ -97,6 +98,14 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
             "behavior_mode": "off", "behavior_model": "behavior-v1", "behavior_threshold": 0.9,
             "behavior_escalate_from": 0.6, "behavior_timeout": 3, "behaviors_file": None}
 STOP_EVENTS = ("Stop", "SubagentStop")
+# installed as a Claude Code plugin: the tuned heads on the shared stack, and the plugin's own settings
+PLUGIN_DEFAULTS = {"base_url": "https://clm.metatheory.dev", "mode": "shadow",
+                   "model": "tool-risk-v1", "calibrate": "none", "threshold": 0.7,
+                   "subagent_mode": "active", "subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
+                   "subagent_thresholds": {"sonnet": 0.95, "haiku": 0.95},
+                   "behavior_mode": "active", "behavior_model": "behavior-v1"}
+PLUGIN_OPTIONS = {"api_key": "api_key", "base_url": "base_url"}
+PLUGIN_SWITCHES = {"tool_gate": "mode", "subagent_downgrades": "subagent_mode", "behavior_checks": "behavior_mode"}
 RUBRICS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rubrics")
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 # CLM embeds the first 2048 tokens of a state (about 7-8K characters of code) and the question
@@ -171,21 +180,60 @@ def raw_log(event: dict, path: str) -> None:
         f.write(json.dumps({"logged_at": now(), **event}, ensure_ascii=False, default=str) + "\n")
 
 
+def data_dir() -> str:
+    """Local state: the plugin's data dir when installed as a plugin, else ~/.config/clm."""
+    return os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.config/clm")
+
+
+def paused() -> bool:
+    return os.path.exists(os.path.join(data_dir(), "paused"))
+
+
 def load_config() -> dict:
+    """DEFAULTS < (as a plugin) PLUGIN_DEFAULTS < the config file < the plugin's settings < env."""
     cfg = dict(DEFAULTS)
+    plugin = bool(os.environ.get("CLAUDE_PLUGIN_ROOT"))
+    if plugin:
+        cfg.update(PLUGIN_DEFAULTS)
     path = os.environ.get("CLM_HOOK_CONFIG") or os.path.expanduser("~/.config/clm/claude-code.json")
     try:
         with open(path, encoding="utf-8") as f:
             cfg.update(json.load(f))
     except (OSError, ValueError):
         pass
+    if plugin:
+        for opt, key in PLUGIN_OPTIONS.items():
+            v = os.environ.get(f"CLAUDE_PLUGIN_OPTION_{opt.upper()}", "").strip()
+            if v:
+                cfg[key] = v
+        for opt, key in PLUGIN_SWITCHES.items():               # on: active, off: shadow (still logged)
+            v = os.environ.get(f"CLAUDE_PLUGIN_OPTION_{opt.upper()}", "").strip().lower()
+            if v:
+                cfg[key] = "active" if v in ("true", "1", "yes", "on") else "shadow"
     # the file's own key wins over CLM_API_KEY (which may belong to another agent);
     # CLM_HOOK_MODE always wins, so CLM_HOOK_MODE=off disables the hook for one session
     for key, env in (("base_url", "CLM_BASE_URL"), ("api_key", "CLM_API_KEY")):
         cfg[key] = cfg.get(key) or os.environ.get(env)
     if os.environ.get("CLM_HOOK_MODE"):
         cfg["mode"] = os.environ["CLM_HOOK_MODE"]
+    if paused():                                  # /clm:off
+        cfg["mode"] = "off"
     return cfg
+
+
+def note(event: dict, kind: str, detail: str) -> str:
+    """Log something CLM changed to the local actions log (for /clm:status). -> the user notice."""
+    msg = f"CLM: {detail}"
+    try:
+        d = data_dir()
+        os.makedirs(d, exist_ok=True)
+        fd = os.open(os.path.join(d, "actions.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": now(), "session_id": event.get("session_id"), "kind": kind,
+                                "detail": detail}) + "\n")
+    except OSError:
+        pass
+    return msg
 
 
 def now() -> str:
@@ -420,7 +468,7 @@ def run_background(payload: dict) -> None:
 def first_claim(event: dict) -> bool:
     """True for the first copy of this hook to see this event.
 
-    The hook may be registered twice (a repo's .claude/settings.json and ~/.claude/settings.json);
+    The hook may be registered twice (the plugin and a hand-made entry in ~/.claude/settings.json);
     both copies run, so the second one steps aside. Claims older than a day are swept.
     """
     d = os.environ.get("CLM_HOOK_STATE_DIR") or os.path.join(
@@ -517,12 +565,57 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
     background({"kind": "behavior", "items": items})
     if not flags:
         return None
+    flagged = ", ".join(f.split(" (")[0] for f in flags)
     return {"decision": "block",
+            "systemMessage": note(event, "behavior", f"flagged {flagged}; Claude was asked to check before stopping"),
             "reason": "CLM behavior check flagged this turn. " + " ".join(f"- {f}" for f in flags)
                       + " If a flag is wrong, say so in one sentence and stop."}
 
 
+def status() -> str:
+    cfg = load_config()
+    state = "PAUSED (/clm:on resumes)" if paused() else "OFF" if cfg.get("mode") not in ("shadow", "active") else "on"
+    lines = [f"CLM hook: {state}; "
+             f"tool calls {cfg.get('mode')}, subagent models {cfg.get('subagent_mode')}, "
+             f"behavior checks {cfg.get('behavior_mode')}; server {cfg.get('base_url') or 'NOT SET'}; "
+             f"key {'set' if cfg.get('api_key') else 'NOT SET (plugin settings: api_key)'}"]
+    try:
+        with open(os.path.join(data_dir(), "actions.jsonl"), encoding="utf-8") as f:
+            acts = [json.loads(x) for x in f if x.strip()]
+    except (OSError, ValueError):
+        acts = []
+    week = [a for a in acts if a["at"] >= (datetime.datetime.now(datetime.timezone.utc)
+                                          - datetime.timedelta(days=7)).isoformat()]
+    counts = {k: sum(a["kind"] == k for a in week) for k in ("subagent", "behavior", "tool")}
+    lines.append(f"last 7 days: {counts['subagent']} subagent downgrades, {counts['behavior']} behavior flags, "
+                 f"{counts['tool']} tool calls stopped")
+    lines += [f"  {a['at'][:16].replace('T', ' ')}  {a['detail']}" for a in acts[-10:]]
+    return "\n".join(lines)
+
+
+def cli(args: list[str]) -> int:
+    """--status | --pause | --resume, optionally with --data DIR (the plugin's data dir, from a skill)."""
+    if "--data" in args:
+        i = args.index("--data")
+        if i + 1 < len(args) and args[i + 1]:
+            os.environ["CLAUDE_PLUGIN_DATA"] = args[i + 1]
+        args = args[:i] + args[i + 2:]
+    flag = os.path.join(data_dir(), "paused")
+    if args == ["--pause"]:
+        os.makedirs(data_dir(), exist_ok=True)
+        open(flag, "w").close()
+        print("CLM paused: the hook does nothing in any session until /clm:on")
+    elif args == ["--resume"]:
+        if os.path.exists(flag):
+            os.remove(flag)
+        print("CLM resumed")
+    print(status())
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:2] in (["--status"], ["--pause"], ["--resume"]):
+        return cli(sys.argv[1:])
     if sys.argv[1:] == ["--background"]:
         try:
             run_background(json.load(sys.stdin))
@@ -556,6 +649,9 @@ def main() -> int:
             if cfg["mode"] == "active":
                 clm = classify(cfg, state, timeout=float(cfg["timeout"]))
                 out, esc, acted = decide(clm, cfg), None, None
+                if out:
+                    out["systemMessage"] = note(event, "tool", f"{out['hookSpecificOutput']['permissionDecision']} "
+                                                f"{event.get('tool_name')} (p={clm['probability']:.2f})")
                 # narrow escalation: only when CLM leans review/block but is below the threshold
                 if out is None and cfg.get("tool_escalate") and "error" not in clm and clm["choice"] != "allow":
                     esc = judge(cfg, state, INSTRUCTIONS, OPTIONS, "tools.md")
@@ -585,6 +681,7 @@ def main() -> int:
                     if model:
                         out = out or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
                         out["hookSpecificOutput"]["updatedInput"] = {**event["tool_input"], "model": model}
+                        out["systemMessage"] = note(event, "subagent", f"this subagent runs on {model} ({why})")
                 else:
                     background({"kind": "subagent", "event": event, "state": sub})
             if out:

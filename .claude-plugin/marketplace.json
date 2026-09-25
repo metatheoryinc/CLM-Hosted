@@ -1,0 +1,14 @@
+{
+  "name": "clm-hosted",
+  "owner": {
+    "name": "Metatheory"
+  },
+  "description": "CLM (Contrastive Language Model) integrations for Claude Code, from metatheoryinc/CLM-Hosted.",
+  "plugins": [
+    {
+      "name": "clm",
+      "source": "./integrations/claude_code",
+      "description": "CLM in Claude Code: cheaper subagent models when CLM is confident, behavior checks when a turn ends, and a shadow classifier for tool calls."
+    }
+  ]
+}

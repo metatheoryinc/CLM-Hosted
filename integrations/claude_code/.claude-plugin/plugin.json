@@ -1,0 +1,43 @@
+{
+  "name": "clm",
+  "version": "0.1.0",
+  "description": "CLM in Claude Code: cheaper subagent models when CLM is confident, behavior checks when a turn ends, and a shadow classifier for tool calls.",
+  "author": {
+    "name": "Metatheory"
+  },
+  "homepage": "https://github.com/metatheoryinc/CLM-Hosted/tree/main/integrations/claude_code",
+  "repository": "https://github.com/metatheoryinc/CLM-Hosted",
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "CLM agent key",
+      "sensitive": true,
+      "required": true,
+      "description": "The agent key for the CLM stack (ask whoever runs it). Stored in your keychain."
+    },
+    "base_url": {
+      "type": "string",
+      "title": "CLM server",
+      "default": "https://clm.metatheory.dev",
+      "description": "The CLM stack's URL."
+    },
+    "subagent_downgrades": {
+      "type": "boolean",
+      "title": "Cheaper subagent models",
+      "default": true,
+      "description": "On: when CLM is confident a subagent task does not need the model it would run on, it runs on a cheaper one (downgrade only). Off: log only."
+    },
+    "behavior_checks": {
+      "type": "boolean",
+      "title": "Behavior checks",
+      "default": true,
+      "description": "On: when a turn ends CLM checks it (claimed success without checking, stale task, ...) and may ask Claude to fix it. Off: log only."
+    },
+    "tool_gate": {
+      "type": "boolean",
+      "title": "Tool-call gate",
+      "default": false,
+      "description": "On: a confident review/block pick forces the permission prompt or denies the call. Off: log only."
+    }
+  }
+}

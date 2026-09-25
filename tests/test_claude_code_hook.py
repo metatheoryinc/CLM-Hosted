@@ -614,3 +614,85 @@ def test_a_behavior_can_set_its_own_thresholds(run, tmp_path, fake_judge):
                   extra={"behavior_mode": "active", "behaviors_file": str(f), "judge_cmd": fake_judge["cmd"]},
                   env_extra={"FAKE_JUDGE_LABEL": "absent", "FAKE_JUDGE_LOG": fake_judge["log"]})
     assert p.stdout == "" and fake_judge["calls"]() == 1       # 0.95 is below its own 0.99: the judge said no
+
+
+# ── as a Claude Code plugin ──────────────────────────────────────────────────
+
+def plugin_env(tmp_path, **options):
+    env = {"CLAUDE_PLUGIN_ROOT": os.path.dirname(HOOK), "CLAUDE_PLUGIN_DATA": str(tmp_path / "pdata")}
+    env.update({f"CLAUDE_PLUGIN_OPTION_{k.upper()}": v for k, v in options.items()})
+    return env
+
+
+def test_plugin_settings_and_switches(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLM_HOOK_CONFIG", str(tmp_path / "none.json"))
+    for k, v in plugin_env(tmp_path, api_key="k-plugin", subagent_downgrades="false", behavior_checks="true",
+                           tool_gate="true").items():
+        monkeypatch.setenv(k, v)
+    cfg = hook.load_config()
+    assert (cfg["api_key"], cfg["base_url"]) == ("k-plugin", "https://clm.metatheory.dev")
+    assert (cfg["subagent_mode"], cfg["behavior_mode"], cfg["mode"]) == ("shadow", "active", "active")
+    assert cfg["subagent_model"] == "subagent-tier-v2" and cfg["behavior_model"] == "behavior-v1"
+    # the config file tunes; the plugin's own settings still win for the key and the switches
+    (tmp_path / "c.json").write_text(json.dumps({"api_key": "k-file", "threshold": 0.8, "subagent_mode": "active"}))
+    monkeypatch.setenv("CLM_HOOK_CONFIG", str(tmp_path / "c.json"))
+    cfg = hook.load_config()
+    assert (cfg["api_key"], cfg["threshold"], cfg["subagent_mode"]) == ("k-plugin", 0.8, "shadow")
+
+
+def test_without_the_plugin_nothing_changes(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLM_HOOK_CONFIG", str(tmp_path / "none.json"))
+    for k in [k for k in os.environ if k.startswith("CLAUDE_PLUGIN_")]:
+        monkeypatch.delenv(k)
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "ignored")
+    cfg = hook.load_config()
+    assert cfg["mode"] == "off" and cfg["api_key"] is None
+
+
+def test_a_downgrade_tells_the_user(run, tmp_path):
+    p, _, _ = run(agent_call(tid="toolu_n1"), probs=SONNET, extra=ACTIVE, env_extra=plugin_env(tmp_path))
+    out = json.loads(p.stdout)
+    assert out["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+    assert out["systemMessage"].startswith("CLM: this subagent runs on sonnet")
+    [a] = [json.loads(x) for x in (tmp_path / "pdata" / "actions.jsonl").read_text().splitlines()]
+    assert a["kind"] == "subagent" and a["session_id"] == "s1"
+
+
+def test_a_behavior_block_tells_the_user(run, tmp_path):
+    probs = {k: ABSENT for k in BEHAVIORS}
+    probs["stale_task"] = {"present": 0.97, "absent": 0.02, "not_observable": 0.01}
+    p, _, _ = run(stop(tmp_path), extra={"behavior_mode": "active"}, probs=probs)
+    out = json.loads(p.stdout)
+    assert out["decision"] == "block" and out["systemMessage"].startswith("CLM: flagged stale_task")
+
+
+def test_pause_resume_and_status(run, tmp_path):
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith(("CLM_", "CLAUDE_PLUGIN"))},
+           "CLM_HOOK_CONFIG": str(tmp_path / "none.json"), "HOME": str(tmp_path / "home")}
+    cli = lambda *a: subprocess.run([sys.executable, HOOK, *a, "--data", str(tmp_path / "pdata")],  # noqa: E731
+                                    capture_output=True, text=True, env=env, timeout=30).stdout
+    out = cli("--pause")
+    assert "CLM paused" in out and "PAUSED" in out and (tmp_path / "pdata" / "paused").exists()
+    # paused: the hook does nothing at all
+    p, _, clm = run(agent_call(tid="toolu_n2"), probs=SONNET, extra=ACTIVE, env_extra=plugin_env(tmp_path))
+    assert p.stdout == "" and clm.systemone == []
+    assert "CLM resumed" in cli("--resume") and not (tmp_path / "pdata" / "paused").exists()
+    run(agent_call(tid="toolu_n3"), probs=SONNET, extra=ACTIVE, env_extra=plugin_env(tmp_path))
+    out = cli("--status")
+    assert "1 subagent downgrades" in out and "this subagent runs on sonnet" in out and "agent-key" not in out
+
+
+def test_the_plugin_files_agree_with_the_hook():
+    root = os.path.dirname(HOOK)
+    manifest = json.load(open(os.path.join(root, ".claude-plugin", "plugin.json")))
+    assert set(manifest["userConfig"]) == set(hook.PLUGIN_OPTIONS) | set(hook.PLUGIN_SWITCHES)
+    assert manifest["userConfig"]["api_key"]["sensitive"] is True
+    hooks = json.load(open(os.path.join(root, "hooks", "hooks.json")))["hooks"]
+    for event, groups in hooks.items():
+        [h] = groups[0]["hooks"]
+        assert "${CLAUDE_PLUGIN_ROOT}/clm_hook.py" in h["command"]
+        assert bool(h.get("async")) == (event not in ("PreToolUse", "Stop", "SubagentStop")), event
+    assert set(hooks) == {"PreToolUse", "Stop", "SubagentStop", "PermissionRequest", "PermissionDenied",
+                          "PostToolUse", "PostToolUseFailure", "SubagentStart"}
+    market = json.load(open(os.path.join(os.path.dirname(os.path.dirname(root)), ".claude-plugin", "marketplace.json")))
+    assert market["plugins"][0]["source"] == "./integrations/claude_code"
