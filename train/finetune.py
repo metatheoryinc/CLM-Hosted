@@ -512,10 +512,19 @@ def run_choice(args) -> dict:
         zc = F.normalize(ah(c.reshape(-1, c.shape[-1])), dim=-1).view(c.shape[0], c.shape[1], -1)
         return logit_scale.exp().clamp(max=100.0) * torch.einsum("bh,bkh->bk", zq, zc)
 
+    # --balance for softce: per-example weight = frequency of its gold label ** -power
+    lab_freq = defaultdict(int)
+    for e in ex["train"]:
+        lab_freq[e.label] += 1
+
     def loss_of(lg, tgt, lab):
+        w = (torch.tensor([lab_freq[int(l)] for l in lab], dtype=torch.float32, device=lg.device)
+             ** -args.balance_power) if args.balance else torch.ones(len(lab), device=lg.device)
         if args.targets == "soft":
-            return -(tgt * F.log_softmax(lg, -1)).sum(-1).mean()
-        return F.cross_entropy(lg, lab)
+            per = -(tgt * F.log_softmax(lg, -1)).sum(-1)
+        else:
+            per = F.cross_entropy(lg, lab, reduction="none")
+        return (per * w).sum() / w.sum()
 
     if args.loss == "infonce":  # flat train set: every text once, options as indices into it
         tr = ex["train"]
@@ -713,7 +722,7 @@ def main() -> None:
     ch.add_argument("--targets", choices=["soft", "hard"], default="soft",
                     help="train on annotator distributions (soft) or gold labels (hard)")
     ch.add_argument("--balance", action="store_true",
-                    help="weight examples by inverse gold-label frequency (imbalanced data; infonce loss)")
+                    help="weight examples by inverse gold-label frequency (imbalanced data)")
     ch.add_argument("--balance-power", type=float, default=1.0,
                     help="with --balance: weight = frequency ** -power (1 = fully balanced, 0.5 = partial)")
     ch.add_argument("--select-metric", choices=["acc", "balanced_acc"], default="acc",

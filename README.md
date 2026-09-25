@@ -454,6 +454,21 @@ template, last 8191 tokens of the state, first 8191 of the action), so the
 encoder must run with `--max-model-len 8192`. `CLMClient.verify(trajectories)`
 is the client form.
 
+### `POST /v1/encoder`
+
+`{"texts": [...]}` (1–256) returns the encoder embeddings `/v1/systemone` would use for
+those texts (same truncation and normalisation), base64 float32. Filling
+`train/finetune.py`'s `--embed-cache` from it makes a trained head see exactly what it
+will be served, and lets the head train anywhere, on CPU.
+
+### `PUT /v1/admin/heads/{name}` · `GET /v1/admin/heads` · `DELETE /v1/admin/heads/{name}`
+
+Serve a trained head without a restart: the body of the `PUT` is a checkpoint (the
+`best_head.pt` `train/finetune.py` writes), which is loaded with `weights_only` (a
+checkpoint cannot run code), saved to `CLM_HEADS_DIR` (reloaded at boot; unloadable files
+are skipped) and served as model `name` at once. Names are `[a-z0-9-]`, up to 40, not a
+built-in model. `clm-heads upload PATH --name NAME` is the client.
+
 ### `GET /`
 
 The playground (see [above](#playground)), unless `clm-serve --no-ui`. Static

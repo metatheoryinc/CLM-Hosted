@@ -135,6 +135,26 @@ pulumi config set --path 'decisionReaders[0]' reviewer
 pulumi up
 ```
 
+## Trained heads
+
+Heads trained with `train/finetune.py` (see
+[integrations/claude_code](../integrations/claude_code/README.md) for the subagent-tier
+head) are uploaded to the Pod and served by name. Only agents in `adminAgents` may use
+`/v1/admin/*`; the gateway refuses everyone else before the request reaches the Pod.
+
+```bash
+pulumi config set --path 'adminAgents[0]' <agent name>
+pulumi up
+```
+
+```bash
+CLM_BASE_URL=https://clm.metatheory.dev CLM_API_KEY=<that agent's key> clm-heads upload best_head.pt --name subagent-tier
+```
+
+Heads live on the Pod's volume (`/workspace/clm/heads`): a Pod restart keeps them, a
+replaced Pod (a `gpuTypes` or `countryCode` change) loses them, so keep the checkpoints
+and upload them again after a replacement.
+
 ## Changes
 
 | change | effect |

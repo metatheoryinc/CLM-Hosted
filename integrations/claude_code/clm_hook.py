@@ -56,6 +56,8 @@ OPTIONS = {
 }
 AGENT_TOOLS = ("Agent", "Task")            # "Task" is the tool's former name
 SUBAGENT_WORKFLOW = "routing/claude-code-subagents"
+# Trained heads (e.g. subagent-tier) are fitted on exactly this question and these options as
+# text: changing either silently invalidates them. Retrain before editing.
 SUBAGENT_INSTRUCTIONS = "Which model is capable enough for this subagent task, at the lowest cost?"
 SUBAGENT_OPTIONS = {
     "haiku": "Searches, reads or lists code and files and reports what it finds.",
@@ -71,7 +73,9 @@ BASELINE = {"PostToolUse": ("allow", 1), "PostToolUseFailure": ("allow", 1),
 DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, "timeout": 1.5,
             "raw_log": False, "raw_log_path": "~/.config/clm/claude-code-events.jsonl",
             "subagent_mode": "shadow", "subagent_threshold": 0.9, "subagent_timeout": 1.5,
-            "calibrate": "content-free"}
+            "calibrate": "content-free",
+            # the subagent question can use its own (trained) head, calibration and per-tier thresholds
+            "subagent_model": None, "subagent_calibrate": None, "subagent_thresholds": None}
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 MAX_FIELD, MAX_INPUT = 800, 3000
 
@@ -161,13 +165,14 @@ def post(cfg: dict, path: str, body: dict, timeout: float):
 
 
 def classify(cfg: dict, state: dict, timeout: float, instructions: str = INSTRUCTIONS,
-             options: dict = OPTIONS) -> dict:
+             options: dict = OPTIONS, model: str | None = None, calibrate: str | None = None) -> dict:
     t0 = time.perf_counter()
     try:
-        body = {"state": state, "model": cfg.get("model", "clm-latest"),
+        calibrate = cfg.get("calibrate") if calibrate is None else calibrate
+        body = {"state": state, "model": model or cfg.get("model", "clm-latest"),
                 "questions": {QID: {"type": "choice", "instructions": instructions, "criteria": options}}}
-        if cfg.get("calibrate") not in (None, False, "none"):
-            body["calibrate"] = cfg["calibrate"]
+        if calibrate not in (None, False, "none"):
+            body["calibrate"] = calibrate
         j = post(cfg, "/v1/systemone", body, timeout)
         a = j["answers"][QID]
         return {"model": j.get("model"), "calibrate": j.get("calibrate", "none"), "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
@@ -175,6 +180,11 @@ def classify(cfg: dict, state: dict, timeout: float, instructions: str = INSTRUC
                 "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
     except Exception as e:  # noqa: BLE001
         return {"error": f"{type(e).__name__}: {e}"[:300], "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
+
+
+def classify_subagent(cfg: dict, state: dict, timeout: float) -> dict:
+    return classify(cfg, state, timeout, SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS,
+                    model=cfg.get("subagent_model"), calibrate=cfg.get("subagent_calibrate"))
 
 
 def record(event: dict, state: dict, clm: dict, cfg: dict, acted: str) -> dict:
@@ -234,7 +244,8 @@ def pick_downgrade(event: dict, clm: dict, cfg: dict) -> tuple[str | None, str]:
         return None, "the agent definition sets the model"
     if "error" in clm:
         return None, "CLM error"
-    if clm["probability"] < float(cfg["subagent_threshold"]):
+    thresholds = cfg.get("subagent_thresholds") or {}
+    if clm["probability"] < float(thresholds.get(clm["choice"], cfg["subagent_threshold"])):
         return None, "below the threshold"
     current = tier_of(os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL")) or "opus"   # inherited: assume the top tier
     if TIER_RANK[clm["choice"]] >= TIER_RANK[current]:
@@ -278,7 +289,7 @@ def background(payload: dict) -> None:
 def run_background(payload: dict) -> None:
     cfg, event = load_config(), payload["event"]
     if payload["kind"] == "subagent":
-        clm = payload.get("clm") or classify(cfg, payload["state"], 10, SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
+        clm = payload.get("clm") or classify_subagent(cfg, payload["state"], 10)
         rec = subagent_record(event, payload["state"], clm)
         if "applied" in payload:
             rec.update(mode="active", threshold=cfg["subagent_threshold"], acted="clm" if payload["applied"] else "baseline")
@@ -370,7 +381,7 @@ def main() -> int:
                 sub = subagent_state(event)
                 denied = out and out["hookSpecificOutput"]["permissionDecision"] == "deny"
                 if cfg.get("subagent_mode") == "active" and not denied:
-                    clm_s = classify(cfg, sub, float(cfg["subagent_timeout"]), SUBAGENT_INSTRUCTIONS, SUBAGENT_OPTIONS)
+                    clm_s = classify_subagent(cfg, sub, float(cfg["subagent_timeout"]))
                     model, why = pick_downgrade(event, clm_s, cfg)
                     background({"kind": "subagent", "event": event, "state": sub, "clm": clm_s,
                                 "applied": model, "why": why})

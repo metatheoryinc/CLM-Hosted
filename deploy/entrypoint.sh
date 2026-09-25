@@ -15,7 +15,7 @@ if [ -z "${CLM_API_KEY:-}" ] && [ "${ALLOW_NO_AUTH:-0}" != "1" ]; then
     exit 1
 fi
 
-mkdir -p "$HF_HOME" "$CLM_CKPT_DIR" /workspace/logs
+mkdir -p "$HF_HOME" "$CLM_CKPT_DIR" "$CLM_CKPT_DIR/heads" /workspace/logs
 
 # DeepSWE verifier head (~75 MB), checked against the SHA-256 on its model card
 EXTRA_MODELS=()
@@ -68,6 +68,7 @@ fi
 clm-serve --host 0.0.0.0 --port "$CLM_PORT" \
     --emb-url "http://127.0.0.1:$EMB_PORT/v1/embeddings" \
     --max-tokens "$CLM_MAX_TOKENS" \
+    --ckpt-dir "$CLM_CKPT_DIR/heads" \
     --no-ui "${EXTRA_MODELS[@]}" ${CLM_EXTRA_ARGS:-} &
 CLM_PID=$!
 

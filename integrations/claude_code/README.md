@@ -84,6 +84,25 @@ that is set. It never:
 * touches plugin agents (`plugin:agent`), whose definitions it cannot see;
 * acts on an error or timeout.
 
+### A trained head for this question
+
+Zero-shot `clm-latest` is at chance on real subagent prompts, calibrated or not. A head
+fine-tuned on labelled subagent calls (rubric labels from a strong model, trained with
+`train/finetune.py --task choice --balance --select-metric balanced_acc`) is not: on
+held-out projects it never downgraded a task the labels said needed `opus` at a
+threshold of 0.6 or more. Serve it (`clm-heads upload … --name subagent-tier`) and point
+the subagent question at it, uncalibrated (it was trained without calibration), with a
+stricter bar for `haiku` than for `sonnet`:
+
+```json
+"subagent_model": "subagent-tier", "subagent_calibrate": "none",
+"subagent_thresholds": {"sonnet": 0.8, "haiku": 0.95}
+```
+
+The head is trained on the exact `SUBAGENT_INSTRUCTIONS` / `SUBAGENT_OPTIONS` text in the
+hook; editing either means retraining. The tool-call question keeps `model` and
+`calibrate`.
+
 Each record says what it did and why (`meta.applied_model`, `meta.why`), and the tier
 that actually ran is logged when the subagent finishes. A wrong downgrade costs quality,
 not safety: watch for subagents that fail or come back thin, and raise the threshold or

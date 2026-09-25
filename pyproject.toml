@@ -44,6 +44,7 @@ all = ["clm[serve,hf,verify]"]
 clm-serve = "clm.server:main"
 clm-download = "clm.heads:download_main"
 clm-decisions = "clm.decisions_cli:main"
+clm-heads = "clm.heads_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Contrastive-LM/CLM"

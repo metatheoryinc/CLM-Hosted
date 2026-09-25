@@ -80,7 +80,8 @@ class HeadPair:
 
     def _load(self) -> None:
         import torch
-        ck = torch.load(self.path, map_location="cpu")
+        # weights_only: checkpoints can be uploaded (POST /v1/admin/heads); never unpickle code
+        ck = torch.load(self.path, map_location="cpu", weights_only=True)
         cfg = dict(ck["cfg"])
         kw = dict(width=cfg["width"], depth=cfg["depth"],
                   proj=ck.get("projection_dim", cfg.get("projection_dim", PROJ_DIM)),

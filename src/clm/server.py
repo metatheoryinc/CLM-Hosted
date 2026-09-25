@@ -11,6 +11,8 @@
     POST /v1/verify      {"trajectories": [{"id", "steps": [{"state", "action"}]}], "model": "deepswe",
                           "window": 12}                -> {"model", "best", "trajectories": [{id, score, ...}]}
     POST /v1/encoder     {"texts": [..]}               -> {"dim", "dtype", "embeddings": [base64 float32], "usage"}
+    PUT  /v1/admin/heads/{name}   body: checkpoint bytes -> serve it as model {name} (admin agents only)
+    GET  /v1/admin/heads · DELETE /v1/admin/heads/{name}
     GET  /v1/models      -> {"models": [{"name", "description", "release_date"}]}
     GET  /health         -> {"ok": true, ...}
     GET  /               -> the playground: a zero-dependency web UI for the endpoint
@@ -65,6 +67,8 @@ class _RevalidatingStatic(StaticFiles):
 
 
 MAX_ENCODER_TEXTS = 256
+MAX_HEAD_BYTES = 256 << 20
+HEAD_NAME = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
 def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False) -> FastAPI:
@@ -159,6 +163,52 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
             raise HTTPException(502, str(e)) from e
         return JSONResponse({"model": body.get("model") or DEFAULT_MODEL, "ranked": ranked},
                             headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
+
+    # ── uploaded heads: /v1/admin/*. The gateway only lets its admin agents through. ──
+    heads_dir = os.environ.get("CLM_HEADS_DIR") or os.path.join(DEFAULT_CKPT_DIR, "heads")
+
+    @app.get("/v1/admin/heads")
+    def list_heads(authorization: str | None = Header(default=None)):
+        auth(authorization)
+        return {"heads": [{"name": n, "path": h.path, "params": h.n_params, "projection_dim": h.proj_dim}
+                          for n, h in sorted(engine.heads.items()) if n not in engine.RESERVED]}
+
+    @app.put("/v1/admin/heads/{name}")
+    async def upload_head(name: str, request: Request, authorization: str | None = Header(default=None)):
+        """Body: a checkpoint (``torch.save`` of state_head / action_head / logit_scale / cfg).
+        Saved to ``CLM_HEADS_DIR`` (reloaded at boot) and served as ``name`` from now on."""
+        auth(authorization)
+        if not HEAD_NAME.match(name) or name in engine.RESERVED:
+            raise HTTPException(422, "name must be 1-40 of [a-z0-9-] and not a built-in model")
+        data = await request.body()
+        if not 0 < len(data) <= MAX_HEAD_BYTES:
+            raise HTTPException(413, f"checkpoint must be 1..{MAX_HEAD_BYTES} bytes")
+        os.makedirs(heads_dir, exist_ok=True)
+        final, tmp = os.path.join(heads_dir, f"{name}.pt"), os.path.join(heads_dir, f".{name}.pt.upload")
+        with open(tmp, "wb") as f:
+            f.write(data)
+        try:
+            engine.add_head(name, tmp)            # load before replacing anything
+        except ValueError as e:
+            os.remove(tmp)
+            raise HTTPException(422, str(e.args[0])) from e
+        os.replace(tmp, final)
+        head = engine.add_head(name, final)
+        import hashlib
+        return {"name": name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+                "params": head.n_params, "projection_dim": head.proj_dim}
+
+    @app.delete("/v1/admin/heads/{name}")
+    def delete_head(name: str, authorization: str | None = Header(default=None)):
+        auth(authorization)
+        try:
+            engine.remove_head(name)
+        except ModelNotFound as e:
+            raise HTTPException(404, str(e.args[0])) from e
+        path = os.path.join(heads_dir, f"{name}.pt")
+        if os.path.exists(path):
+            os.remove(path)
+        return {"deleted": name}
 
     @app.post("/v1/encoder")
     async def encoder(request: Request, authorization: str | None = Header(default=None)):

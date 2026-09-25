@@ -329,3 +329,18 @@ def test_calibration_is_requested_by_default(run, extra, sent):
     _, _, clm = run(pre(tid=f"toolu_cal_{sent}"), extra=extra)
     clm.wait(1)
     assert clm.systemone[0][1].get("calibrate") == sent
+
+
+def test_the_subagent_question_uses_its_own_head_calibration_and_thresholds(run):
+    extra = {**ACTIVE, "subagent_model": "subagent-tier", "subagent_calibrate": "none",
+             "subagent_thresholds": {"sonnet": 0.8, "haiku": 0.95}}
+    p, _, clm = run(agent_call(tid="toolu_h1"), probs={"haiku": 0.05, "sonnet": 0.85, "opus": 0.10}, extra=extra)
+    assert json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"   # 0.85 >= 0.8
+    clm.wait(2)
+    bodies = {b["questions"]["route"]["instructions"]: b for _, b in clm.systemone}
+    sub = bodies[hook.SUBAGENT_INSTRUCTIONS]
+    assert sub["model"] == "subagent-tier" and "calibrate" not in sub
+    tool = bodies[hook.INSTRUCTIONS]
+    assert tool["model"] == "clm-latest" and tool["calibrate"] == "content-free"         # the tool gate unchanged
+    p, _, _ = run(agent_call(tid="toolu_h2"), probs={"haiku": 0.90, "sonnet": 0.05, "opus": 0.05}, extra=extra)
+    assert p.stdout == ""                                                                  # 0.90 < haiku's 0.95

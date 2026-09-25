@@ -11,6 +11,7 @@
 //   LIMITER            rate limit, keyed by agent name
 //   DECISIONS          D1 database for /v1/decisions (optional: absent -> 404)
 //   DECISION_READERS   JSON ["<agent name>", ...] that may read every agent's decisions
+//   ADMIN_AGENTS       JSON ["<agent name>", ...] that may use /v1/admin/* (uploading heads)
 
 const encoder = new TextEncoder();
 
@@ -125,6 +126,11 @@ export default {
 
     const { success } = await env.LIMITER.limit({ key: agent });
     if (!success) return error(429, "rate limit exceeded");
+
+    // every agent is forwarded with the upstream key, so admin routes are gated here
+    if (url.pathname.startsWith("/v1/admin/") && !JSON.parse(env.ADMIN_AGENTS || "[]").includes(agent)) {
+      return error(403, "admin routes are limited to the gateway's admin agents");
+    }
 
     if (url.pathname === "/v1/decisions") {
       if (!env.DECISIONS) return error(404, "decision collection is not configured");

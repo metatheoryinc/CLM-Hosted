@@ -60,7 +60,14 @@ class Engine:
             self.heads[DEFAULT_MODEL] = HeadPair(DEFAULT_MODEL, ck, device)
         for p in sorted(glob.glob(os.path.join(checkpoint_dir, "*.pt"))) if checkpoint_dir else []:
             if not ck or os.path.abspath(p) != os.path.abspath(ck):
-                self.heads.setdefault(os.path.splitext(os.path.basename(p))[0], HeadPair(os.path.basename(p)[:-3], p, device))
+                name = os.path.splitext(os.path.basename(p))[0]
+                head = HeadPair(name, p, device)
+                try:                      # one bad (e.g. uploaded) file must not stop the server
+                    head.ensure()
+                except Exception as e:  # noqa: BLE001
+                    print(f"[clm] skipping unloadable checkpoint {p}: {type(e).__name__}: {e}", flush=True)
+                    continue
+                self.heads.setdefault(name, head)
         for name, path in (models or {}).items():
             self.heads[name] = HeadPair(name, path, device)
         for h in self.heads.values():
@@ -116,6 +123,26 @@ class Engine:
         return [{"name": n, "release_date": RELEASE,
                  "description": desc.get(n) or f"Projection-head checkpoint {os.path.basename(self.heads[n].path)}"}
                 for n in names]
+
+    # ------------------------------------------------------------------ uploaded heads
+    RESERVED = (DEFAULT_MODEL, RAW_MODEL, VERIFY_MODEL)
+
+    def add_head(self, name: str, path: str) -> HeadPair:
+        """Serve the checkpoint at ``path`` as ``name`` (loads it first; ValueError if it does not)."""
+        if name in self.RESERVED:
+            raise ValueError(f"{name!r} is a built-in model")
+        head = HeadPair(name, path, self.device)
+        try:
+            head.ensure()
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"not a loadable CLM head checkpoint: {type(e).__name__}: {e}") from e
+        self.heads[name] = head
+        return head
+
+    def remove_head(self, name: str) -> None:
+        if name in self.RESERVED or name not in self.heads:
+            raise ModelNotFound(f"no uploaded head {name!r}")
+        del self.heads[name]
 
     def has(self, model: str) -> bool:
         return model == RAW_MODEL or model in self.heads

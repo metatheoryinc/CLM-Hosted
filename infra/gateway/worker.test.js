@@ -93,4 +93,14 @@ assert.equal((await post("nope", record("z"))).status, 401);
 assert.equal((await worker.fetch(new Request("https://clm.example.com/v1/decisions", { method: "DELETE",
   headers: { Authorization: "Bearer key-a" } }), denv)).status, 405);
 assert.equal((await worker.fetch(req("/v1/decisions", "Bearer key-a", "GET"), env)).status, 404, "no D1 binding: 404");
+// ── /v1/admin/*: only ADMIN_AGENTS ──────────────────────────────────────────
+const aenv = { ...env, ADMIN_AGENTS: JSON.stringify(["beta"]) };
+const admin = (key, e = aenv) => worker.fetch(new Request("https://clm.example.com/v1/admin/heads/x",
+  { method: "PUT", headers: { Authorization: `Bearer ${key}` }, body: "bytes" }), e);
+const before = seen.length;
+assert.equal((await admin("key-a")).status, 403, "a non-admin agent is refused at the edge");
+assert.equal(seen.length, before, "and never reaches the Pod");
+assert.equal((await admin("key-b")).status, 200, "an admin agent is forwarded");
+assert.equal(seen.at(-1).headers.get("Authorization"), "Bearer UP");
+assert.equal((await admin("key-b", env)).status, 403, "no ADMIN_AGENTS binding: nobody");
 console.log("worker tests passed");

@@ -68,6 +68,12 @@ config:
       type: string
     default: []
     # agent names (keys of agentKeys) that may read every agent's logged routing decisions
+  adminAgents:
+    type: array
+    items:
+      type: string
+    default: []
+    # agent names (keys of agentKeys) that may use /v1/admin/* (uploading trained heads)
 
 resources:
   # The new provider (github.com/runpod/pulumi-runpod) is not on PyPI; the plugin comes
@@ -160,6 +166,10 @@ resources:
           type: plain_text
           text:
             fn::toJSON: ${decisionReaders}
+        - name: ADMIN_AGENTS
+          type: plain_text
+          text:
+            fn::toJSON: ${adminAgents}
         - name: LIMITER
           type: ratelimit
           namespaceId: ${rateLimitNamespaceId}
