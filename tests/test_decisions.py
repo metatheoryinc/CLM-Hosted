@@ -386,3 +386,40 @@ def test_dry_run_calls_nothing_and_shows_the_prompt(tmp_path, capsys):
 def test_parse_labels(stdout):
     from clm.decisions_cli import parse_labels
     assert parse_labels(stdout) == [{"id": "a", "label": "x"}]
+
+
+def test_a_retract_withdraws_earlier_labels_but_not_later_ones():
+    r = rec(1, "writer", 0.9, "writer")                      # no gold of its own
+    lab = lambda t, label: {"event": "outcome", "id": "r1", "created_at": t, "label": label}          # noqa: E731
+    ret = {"event": "outcome", "id": "r1", "created_at": "t2", "label": None, "retract": True}
+    assert "gold" not in D.merge([r, lab("t1", "reviewer"), ret])[0]
+    assert D.merge([r, lab("t1", "reviewer"), ret, lab("t3", "researcher")])[0]["gold"]["route"]["label"] == "researcher"
+
+
+def clipped_file(tmp_path):
+    src = decisions_file(tmp_path, 4)
+    recs = D.read_jsonl(str(src))
+    recs[0]["state"] = {"input": "command: git commit -m x … [812 more characters]"}
+    recs[1]["state"] = {"instructions": "a long subagent prompt …"}                  # the subagent marker: kept
+    src.write_text("\n".join(json.dumps(e) for e in recs) + "\n")
+    return src
+
+
+def test_clipped_decisions_are_skipped_unless_included(tmp_path, labeler, capsys):
+    src = clipped_file(tmp_path)
+    cli(["label", str(src), "--labeler", labeler, "--dry-run"])
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.startswith("3 decisions to label") and "1 clipped decisions skipped" in first
+    cli(["label", str(src), "--labeler", labeler, "--dry-run", "--include-clipped"])
+    assert "4 decisions to label" in capsys.readouterr().out
+
+
+def test_retract_clipped_only_touches_model_labels(tmp_path, labeler, capsys):
+    src = clipped_file(tmp_path)
+    cli(["label", str(src), "--labeler", labeler, "--include-clipped"])      # r0 gets a model label
+    with open(src, "a") as f:                                                 # r1: a human label, also 'clipped'?
+        f.write(json.dumps({"event": "outcome", "id": "r2", "created_at": "z", "label": "writer"}) + "\n")
+    cli(["label", str(src), "--labeler", labeler, "--retract-clipped"])
+    assert "retracted 1 model labels" in capsys.readouterr().out
+    recs = {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}
+    assert "gold" not in recs["r0"] and recs["r1"]["gold"] and recs["r2"]["gold"]["route"]["label"] == "writer"

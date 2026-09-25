@@ -303,7 +303,12 @@ def merge(events: Iterable[dict]) -> list[dict]:
             continue
         evs = sorted(evs, key=lambda o: o.get("created_at") or "")
         r["outcome"] = evs
-        label = next((o["label"] for o in reversed(evs) if o.get("label")), None)
+        # the latest label wins; a later "retract" event withdraws the labels before it
+        last = next((o for o in reversed(evs) if o.get("label") or o.get("retract")), None)
+        label = last["label"] if last and not last.get("retract") else None
+        if last and last.get("retract"):
+            r["outcome"] = [o for o in evs if not o.get("label") or o["created_at"] > last["created_at"]]
+            continue
         if label is None and any(o.get("ok") is True for o in evs) and not any(o.get("ok") is False for o in evs):
             label = r.get("worker")
         if label is not None:

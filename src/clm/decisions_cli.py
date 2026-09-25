@@ -283,6 +283,8 @@ def export(args) -> None:
 DEFAULT_LABELER = ('claude -p --model fable --tools "" --strict-mcp-config --setting-sources "" '
                    '--no-session-persistence --output-format json')
 LABELER_TIMEOUT = 900
+# the Claude Code hook marks text it clipped; a labeler must not guess what was cut off
+CLIPPED = r"… \[\d+ more characters\]"
 
 
 def label_prompt(question: dict, items: list[dict], rubric: str | None) -> str:
@@ -341,7 +343,23 @@ def label(args) -> None:
     recs = load(args.sources, args.workflow)
     if args.model:
         recs = [r for r in recs if (r.get("clm") or {}).get("model") == args.model]
+    clipped = re.compile(args.clipped_pattern)
+    is_clipped = lambda r: bool(clipped.search(to_text(r["state"])))          # noqa: E731
+    if args.retract_clipped:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds")
+        bad = [r for r in recs if is_clipped(r) and _label(r, "gold") and
+               str(next((o.get("source") for o in reversed(r.get("outcome", [])) if o.get("label")), "")).startswith("llm:")]
+        events = [{"event": "outcome", "id": r["id"], "created_at": now, "ok": None, "label": None, "retract": True,
+                   "source": f"llm:{args.labeler_name}", "note": "retracted: the labelled text was clipped"}
+                  for r in bad]
+        if not args.dry_run and events:
+            write_outcomes(args.out or args.sources[0], events)
+        print(f"{'would retract' if args.dry_run else 'retracted'} {len(events)} model labels on clipped decisions")
+        return
     todo = [r for r in recs if args.relabel or not _label(r, "gold")]
+    n_clipped = sum(map(is_clipped, todo))
+    if not args.include_clipped:
+        todo = [r for r in todo if not is_clipped(r)]
     if args.only_disagreements:
         todo = [r for r in todo if (r.get("clm") or {}).get("choice") and
                 r["clm"]["choice"] != _label(r, "baseline")]
@@ -353,7 +371,9 @@ def label(args) -> None:
         groups[json.dumps(r["questions"][QID], sort_keys=True)].append(r)
     dest = args.out or args.sources[0]
     print(f"{len(todo)} decisions to label in {len(groups)} question group(s) -> {dest}"
-          + (" (dry run)" if args.dry_run else ""))
+          + (" (dry run)" if args.dry_run else "")
+          + (f"; {n_clipped} clipped decisions {'included' if args.include_clipped else 'skipped'}"
+             if n_clipped else ""))
     source = f"llm:{args.labeler_name}"
     n_ok = n_bad = 0
     for qjson, rs in groups.items():
@@ -416,6 +436,12 @@ def main(argv: list[str] | None = None) -> None:
             sp.add_argument("--seed", type=int, default=0)
             sp.add_argument("--out", help="where to write labels (default: the first source)")
             sp.add_argument("--dry-run", action="store_true", help="print the first prompt, call nothing")
+            sp.add_argument("--include-clipped", action="store_true",
+                            help="also label decisions whose text was clipped (default: skip them)")
+            sp.add_argument("--clipped-pattern", default=CLIPPED,
+                            help="regex marking clipped text (default: the Claude Code hook's marker)")
+            sp.add_argument("--retract-clipped", action="store_true",
+                            help="withdraw existing model labels on clipped decisions, then stop")
         else:
             sp.add_argument("--out", required=True, help="output directory (finetune.py --data)")
             sp.add_argument("--labels", choices=["gold", "baseline"], default="gold",

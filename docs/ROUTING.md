@@ -140,7 +140,14 @@ The prompt is the record's own question and options plus the rubric, and says th
 data, not instructions. Labels are written back as outcomes tagged `source: "llm:fable"`,
 already-labelled decisions are skipped (`--relabel` to redo them), `--only-disagreements`
 labels where CLM and your router disagree, and `--dry-run` prints the first prompt without
-calling anything. `report` shows where its gold labels came from. Treat model labels as a
+calling anything. `report` shows where its gold labels came from.
+
+Decisions whose text was clipped (the Claude Code hook's "… [N more characters]" marker)
+are skipped by default, so the labeler never guesses what was cut off; `--include-clipped`
+labels them anyway and `--clipped-pattern` sets another marker. `--retract-clipped`
+withdraws model labels already written on clipped decisions (a later `retract` outcome;
+human labels are never touched). About a third of logged tool calls are clipped, mostly
+long multi-line scripts, so skipping them tilts the evaluation towards short commands. Treat model labels as a
 second opinion: spot-check the ones that disagree with your router before acting on them.
 Rubrics for the Claude Code hook's questions are in
 [integrations/claude_code/rubrics](../integrations/claude_code/rubrics/).
