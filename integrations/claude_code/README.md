@@ -95,9 +95,24 @@ the subagent question at it, uncalibrated (it was trained without calibration), 
 stricter bar for `haiku` than for `sonnet`:
 
 ```json
-"subagent_model": "subagent-tier", "subagent_calibrate": "none",
-"subagent_thresholds": {"sonnet": 0.8, "haiku": 0.95}
+"subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
+"subagent_thresholds": {"sonnet": 0.95, "haiku": 0.95}
 ```
+
+Two things the first trained head got wrong, and what guards against them now:
+
+* **Prompt length leaked the tier.** In real subagent calls, lookups are shorter and
+  high-stakes work longer, and the clip marker ("… [N more characters]") spelled the
+  length out; the head learned "short means haiku" and sent one-line design tasks to
+  haiku with 0.9+ confidence. The subagent state is now clipped to a fixed 1200
+  characters with a plain `…`, and the head is trained with length-balanced synthetic
+  tasks (Fable-written, blind-relabelled) alongside the real ones.
+* **Out-of-range prompts.** `subagent_min_prompt_chars` (default 1000) keeps the hook
+  from downgrading prompts shorter than the trained range, whatever the head says.
+
+Measured on held-out projects (real prompts, rubric labels): at 0.95 about a fifth of
+subagents are downgraded and none the labels say needed `opus`; 15/15 on hand-written
+short tasks it never saw. Re-check the threshold table after retraining.
 
 The head is trained on the exact `SUBAGENT_INSTRUCTIONS` / `SUBAGENT_OPTIONS` text in the
 hook; editing either means retraining. The tool-call question keeps `model` and

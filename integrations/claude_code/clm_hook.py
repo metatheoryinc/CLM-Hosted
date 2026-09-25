@@ -75,9 +75,14 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
             "subagent_mode": "shadow", "subagent_threshold": 0.9, "subagent_timeout": 1.5,
             "calibrate": "content-free",
             # the subagent question can use its own (trained) head, calibration and per-tier thresholds
-            "subagent_model": None, "subagent_calibrate": None, "subagent_thresholds": None}
+            "subagent_model": None, "subagent_calibrate": None, "subagent_thresholds": None,
+            # never downgrade on a prompt shorter than the trained head has seen
+            "subagent_min_prompt_chars": 1000}
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
 MAX_FIELD, MAX_INPUT = 800, 3000
+# The subagent state is clipped to one fixed budget with a fixed marker: a trained head must
+# not be able to read a prompt's length off the text (the tool-call state keeps its count).
+SUBAGENT_MAX_INSTRUCTIONS = 1200
 
 SECRET_PATTERNS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
@@ -121,8 +126,11 @@ def state_of(event: dict) -> dict:
 def subagent_state(event: dict) -> dict:
     """What the subagent is asked to do. Not the model Claude requested: that is the baseline."""
     ti = event.get("tool_input") if isinstance(event.get("tool_input"), dict) else {}
-    return {"task": clip(redact(str(ti.get("description", ""))), MAX_FIELD),
-            "instructions": clip(redact(str(ti.get("prompt", ""))), MAX_INPUT),
+    prompt = redact(str(ti.get("prompt", "")))
+    if len(prompt) > SUBAGENT_MAX_INSTRUCTIONS:
+        prompt = prompt[:SUBAGENT_MAX_INSTRUCTIONS] + " …"
+    return {"task": redact(str(ti.get("description", "")))[:MAX_FIELD],
+            "instructions": prompt,
             "subagent type": str(ti.get("subagent_type") or "general-purpose")}
 
 
@@ -242,6 +250,8 @@ def pick_downgrade(event: dict, clm: dict, cfg: dict) -> tuple[str | None, str]:
     defined = agent_definition_model(agent_type, event.get("cwd", ""))
     if defined:
         return None, "the agent definition sets the model"
+    if len(str(ti.get("prompt") or "")) < int(cfg.get("subagent_min_prompt_chars") or 0):
+        return None, "prompt shorter than the trained range"
     if "error" in clm:
         return None, "CLM error"
     thresholds = cfg.get("subagent_thresholds") or {}

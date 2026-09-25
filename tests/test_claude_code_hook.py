@@ -179,8 +179,11 @@ def test_a_second_registration_of_the_hook_steps_aside(run, tmp_path):
 
 # ── subagents ────────────────────────────────────────────────────────────────
 
-def agent_call(model=None, tid="toolu_a"):
-    ti = {"description": "Find the config loader", "prompt": "Search the repo for where settings are parsed.",
+LONG = "Search the repo for where settings are parsed. " + "Report file and line. " * 60
+
+
+def agent_call(model=None, tid="toolu_a", prompt=None):
+    ti = {"description": "Find the config loader", "prompt": prompt or "Search the repo for where settings are parsed.",
           "subagent_type": "Explore"}
     if model:
         ti["model"] = model
@@ -262,7 +265,7 @@ def test_tier_of(model, tier):
 
 # ── subagents, active ────────────────────────────────────────────────────────
 
-ACTIVE = {"subagent_mode": "active"}
+ACTIVE = {"subagent_mode": "active", "subagent_min_prompt_chars": 0}
 SONNET = {"haiku": 0.02, "sonnet": 0.95, "opus": 0.03}
 
 
@@ -344,3 +347,20 @@ def test_the_subagent_question_uses_its_own_head_calibration_and_thresholds(run)
     assert tool["model"] == "clm-latest" and tool["calibrate"] == "content-free"         # the tool gate unchanged
     p, _, _ = run(agent_call(tid="toolu_h2"), probs={"haiku": 0.90, "sonnet": 0.05, "opus": 0.05}, extra=extra)
     assert p.stdout == ""                                                                  # 0.90 < haiku's 0.95
+
+
+
+def test_short_prompts_are_never_downgraded(run):
+    extra = {"subagent_mode": "active"}                              # the default minimum (1000 chars)
+    p, _, clm = run(agent_call(tid="toolu_s1"), probs=SONNET, extra=extra)
+    assert p.stdout == ""
+    sub = next(r for r in clm.wait(2) if r["workflow"] == "routing/claude-code-subagents")
+    assert sub["meta"]["why"] == "prompt shorter than the trained range"
+    p, _, _ = run(agent_call(tid="toolu_s2", prompt=LONG), probs=SONNET, extra=extra)
+    assert json.loads(p.stdout)["hookSpecificOutput"]["updatedInput"]["model"] == "sonnet"
+
+
+def test_subagent_state_hides_the_prompt_length():
+    a = hook.subagent_state({"tool_input": {"prompt": "x" * 1500}})["instructions"]
+    b = hook.subagent_state({"tool_input": {"prompt": "x" * 9000}})["instructions"]
+    assert a == b == "x" * hook.SUBAGENT_MAX_INSTRUCTIONS + " …"

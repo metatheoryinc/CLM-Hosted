@@ -104,3 +104,26 @@ def test_boot_skips_unloadable_heads(tmp_path):
     base.write_bytes(head_bytes(1))
     e = Engine(TextEmbedder(), checkpoint=str(base), checkpoint_dir=str(d), device="cpu", action_cache=0)
     assert "good" in e.heads and "broken" not in e.heads
+
+
+def test_a_reupload_under_the_same_name_is_not_served_from_the_old_cache(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from clm.server import create_app
+    base = tmp_path / "base.pt"
+    base.write_bytes(head_bytes(1))
+    monkeypatch.setenv("CLM_HEADS_DIR", str(tmp_path / "heads"))
+
+    def served(*uploads):
+        e = Engine(TextEmbedder(), checkpoint=str(base), device="cpu", action_cache="16MiB")
+        assert e.arena is not None                                   # the vector cache is on
+        c = TestClient(create_app(e, api_key="k", ui=False))
+        c.headers["Authorization"] = "Bearer k"
+        out = None
+        for data in uploads:
+            assert c.put("/v1/admin/heads/tier", content=data).status_code == 200
+            out = c.post("/v1/systemone", json={"state": "find it", "questions": Q, "model": "tier"}).json()
+        return out["answers"]["route"]["probabilities"]
+
+    replaced = served(head_bytes(2), head_bytes(3))                 # upload A, query, re-upload B, query
+    fresh = served(head_bytes(3))                                    # B on a fresh server
+    assert replaced == pytest.approx(fresh, abs=1e-6)

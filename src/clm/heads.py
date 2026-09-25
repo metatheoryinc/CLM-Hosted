@@ -12,6 +12,7 @@ The reference head lives at https://huggingface.co/Contrastive-LM/CLM-v0.1-8B
 """
 from __future__ import annotations
 
+import itertools
 import os
 import threading
 from typing import Any
@@ -65,6 +66,9 @@ def make_head(width: int, depth: int = 2, proj: int = PROJ_DIM, activation: str 
     return Head()
 
 
+_LOADS = itertools.count(1)       # process-wide: every load of any head gets its own cache identity
+
+
 class HeadPair:
     """State head + action head from one checkpoint, hot-reloaded when the file changes."""
 
@@ -91,7 +95,7 @@ class HeadPair:
         sh.load_state_dict(ck["state_head"]); ah.load_state_dict(ck["action_head"])
         sh.eval().to(self.device); ah.eval().to(self.device)
         self.state_head, self.action_head, self.cfg = sh, ah, cfg
-        self.generation += 1
+        self.generation = next(_LOADS)
         self.proj_dim = kw["proj"]
         self.scale = float(torch.as_tensor(ck["logit_scale"]).float().exp().clamp(max=100.0))
 
@@ -122,7 +126,8 @@ class HeadPair:
 
     @property
     def namespace(self) -> str:
-        """Identity of these exact weights, for cache keys."""
+        """Identity of these exact weights, for cache keys: unique per load in this process, so a
+        head replaced under the same name (a re-upload) never reuses the old one's vectors."""
         return f"{self.name}@{self.generation}"
 
     @property
