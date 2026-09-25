@@ -2,6 +2,7 @@
 import http.server
 import importlib.util
 import json
+import re
 import os
 import subprocess
 import sys
@@ -164,7 +165,7 @@ def test_secrets_are_redacted(text):
 
 
 def test_long_inputs_are_clipped():
-    s = hook.describe_input({"content": "x" * 5000, "file_path": "/repo/a.py"})
+    s = hook.describe_input({"content": "x" * 20000, "file_path": "/repo/a.py"})
     assert len(s) < hook.MAX_INPUT + 100 and "more characters" in s and "file_path: /repo/a.py" in s
 
 
@@ -364,3 +365,16 @@ def test_subagent_state_hides_the_prompt_length():
     a = hook.subagent_state({"tool_input": {"prompt": "x" * 1500}})["instructions"]
     b = hook.subagent_state({"tool_input": {"prompt": "x" * 9000}})["instructions"]
     assert a == b == "x" * hook.SUBAGENT_MAX_INSTRUCTIONS + " …"
+
+
+def test_clipping_keeps_the_start_and_the_end():
+    cmd = "cd repo && " + "echo filler; " * 1000 + "git push origin main"
+    out = hook.clip(cmd, hook.MAX_INPUT)
+    assert out.startswith("cd repo && ") and out.endswith("git push origin main")
+    assert re.search(r"… \[\d+ more characters\] …", out) and len(out) < hook.MAX_INPUT + 50
+
+
+def test_a_clipped_state_still_matches_the_labelers_skip_pattern():
+    from clm.decisions_cli import CLIPPED
+    s = hook.describe_input({"command": "x" * 20000})
+    assert re.search(CLIPPED, s)

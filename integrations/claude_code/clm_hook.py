@@ -79,7 +79,10 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
             # never downgrade on a prompt shorter than the trained head has seen
             "subagent_min_prompt_chars": 1000}
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
-MAX_FIELD, MAX_INPUT = 800, 3000
+# CLM embeds the first 2048 tokens of a state (about 7-8K characters of code) and the question
+# comes after the state, so the whole state must fit: 6000 characters is ~1700 tokens of code.
+MAX_FIELD, MAX_INPUT = 6000, 6000
+CLIP_HEAD = 0.6                 # a clipped text keeps its start (what runs) and its end (&& git push)
 # The subagent state is clipped to one fixed budget with a fixed marker: a trained head must
 # not be able to read a prompt's length off the text (the tool-call state keeps its count).
 SUBAGENT_MAX_INSTRUCTIONS = 1200
@@ -103,7 +106,12 @@ def redact(text: str) -> str:
 
 
 def clip(text: str, n: int) -> str:
-    return text if len(text) <= n else text[:n] + f" … [{len(text) - n} more characters]"
+    """At most ~n characters: the head and the tail, with the middle marked as cut."""
+    if len(text) <= n:
+        return text
+    head = int(n * CLIP_HEAD)
+    tail = n - head
+    return text[:head] + f" … [{len(text) - n} more characters] … " + text[len(text) - tail:]
 
 
 def describe_input(tool_input) -> str:

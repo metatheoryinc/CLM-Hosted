@@ -150,8 +150,10 @@ confident `review` / `block` picks are ones you would want enforced.
 
 ## What leaves your machine
 
-For each tool call: the tool name, its arguments (each field clipped to 800 characters,
-3000 in total), the working directory and the permission mode. Before sending, the
+For each tool call: the tool name, its arguments (up to 6000 characters, about 1700 tokens
+of code, so the whole state and question fit the 2048 tokens CLM embeds; longer inputs keep
+their start and end, with the middle marked as cut), the working directory and the
+permission mode. Before sending, the
 hook redacts likely secrets: bearer tokens, `key=` / `token=` / `password=` values,
 GitHub, OpenAI, Slack, AWS and Google keys, private key blocks and long hex strings.
 Redaction is best effort: don't opt in on a machine where tool calls carry secrets
