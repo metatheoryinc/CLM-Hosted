@@ -1,6 +1,6 @@
 {
   "name": "clm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CLM in Claude Code: cheaper subagent models when CLM is confident, behavior checks when a turn ends, and a shadow classifier for tool calls.",
   "author": {
     "name": "Metatheory"
