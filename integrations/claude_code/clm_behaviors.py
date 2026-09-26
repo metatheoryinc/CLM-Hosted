@@ -95,17 +95,29 @@ def _messages(line: dict) -> list[dict]:
     return out
 
 
-def trace_of(transcript_path: str, last_assistant_message: str | None = None) -> tuple[dict, list[dict], dict] | None:
-    """-> (metadata, messages, output) for the turn that just ended, or None if there is no turn."""
-    lines = []
-    with open(transcript_path, encoding="utf-8", errors="replace") as f:
+def _read_jsonl(path: str) -> list[dict]:
+    out = []
+    with open(path, encoding="utf-8", errors="replace") as f:
         for raw in f:
             try:
                 e = json.loads(raw)
             except ValueError:
                 continue
-            if e.get("type") in ("user", "assistant") and isinstance(e.get("message"), dict):
-                lines.append(e)
+            if isinstance(e, dict):
+                out.append(e)
+    return out
+
+
+def trace_of(transcript_path: str, last_assistant_message: str | None = None,
+             turn_id: str | None = None) -> tuple[dict, list[dict], dict] | None:
+    """-> (metadata, messages, output) for the turn that just ended, or None if there is no turn.
+
+    Reads Claude Code transcripts and Codex rollouts (``~/.codex/sessions/…/rollout-*.jsonl``).
+    """
+    events = _read_jsonl(transcript_path)
+    if events and events[0].get("type") == "session_meta":
+        return _codex_trace(events, last_assistant_message, turn_id)
+    lines = [e for e in events if e.get("type") in ("user", "assistant") and isinstance(e.get("message"), dict)]
     starts = [i for i, e in enumerate(lines) if _is_prompt(e)]
     if not starts:
         return None
@@ -127,3 +139,56 @@ def trace_of(transcript_path: str, last_assistant_message: str | None = None) ->
     if last_assistant_message:
         output = {"content": last_assistant_message}
     return meta, msgs, output
+
+
+# ── Codex rollouts ───────────────────────────────────────────────────────────
+
+def _text(content) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n".join(str(c.get("text", "")) for c in content or [] if isinstance(c, dict) and c.get("text"))
+
+
+def _codex_trace(events: list[dict], last_assistant_message: str | None, turn_id: str | None):
+    starts = [i for i, e in enumerate(events) if e.get("type") == "event_msg"
+              and (e.get("payload") or {}).get("type") == "task_started"]
+    if not starts:
+        return None
+    start = next((i for i in starts if events[i]["payload"].get("turn_id") == turn_id), starts[-1])
+    # what the user typed (injected context arrives as user messages too; UserMessage items are the prompts)
+    prompts = [(i, _text((e["payload"].get("item") or {}).get("content"))) for i, e in enumerate(events)
+               if e.get("type") == "event_msg" and e["payload"].get("type") == "item_completed"
+               and (e["payload"].get("item") or {}).get("type") == "UserMessage"]
+    this = [t for i, t in prompts if i > start][:1]
+    earlier = [t for i, t in prompts if i < start][-PREVIOUS_PROMPTS:]
+    msgs = [{"role": "user", "content": t} for t in earlier + this if t]
+    meta, model = {}, None
+    for e in events[start:]:
+        p = e.get("payload") or {}
+        if e.get("type") == "turn_context":
+            model = p.get("model") or model
+        if e.get("type") == "event_msg" and p.get("type") == "token_count":
+            meta = (p.get("info") or {}).get("last_token_usage") or meta
+        if e.get("type") != "response_item":
+            continue
+        t = p.get("type")
+        if t == "message" and p.get("role") == "assistant":
+            msgs.append({"role": "assistant", "content": _text(p.get("content"))})
+        elif t in ("function_call", "custom_tool_call"):
+            args = p.get("arguments") if t == "function_call" else p.get("input")
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [{"name": p.get("name"), "arguments": args}]})
+        elif t in ("function_call_output", "custom_tool_call_output"):
+            msgs.append({"role": "tool", "content": _text(p.get("output"))})
+    if model is None:
+        model = next(((e.get("payload") or {}).get("model") for e in reversed(events[:start])
+                      if e.get("type") == "turn_context"), None)
+    metadata = {"model": model, "status": "success",
+                "prompt_tokens": meta.get("input_tokens"), "completion_tokens": meta.get("output_tokens"),
+                "tools_defined": None}
+    if msgs and msgs[-1]["role"] == "assistant" and not msgs[-1].get("tool_calls"):
+        output = msgs.pop()
+    else:
+        output = {"content": ""}
+    if last_assistant_message:
+        output = {"content": last_assistant_message}
+    return metadata, msgs, output

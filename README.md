@@ -374,6 +374,7 @@ The code in this repository is released under the [Apache 2.0 License](LICENSE).
 │   ├── common.py                #   one client for both endpoints: retries, latency, cache
 │   └── t_rex/                   #   Chrome dinosaur game in real time (run.py --model clm|jev)
 ├── integrations/claude_code/    # Claude Code plugin: subagent models, behavior checks, tool calls
+├── integrations/codex/          # the same hook for OpenAI Codex (install.py)
 ├── docs/FINETUNING.md           # the fine-tuning guide
 └── docs/ROUTING.md              # routing agents with CLM: shadow, measure, go active, fine-tune
 ```

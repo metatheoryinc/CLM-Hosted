@@ -104,6 +104,12 @@ PLUGIN_DEFAULTS = {"base_url": "https://clm.metatheory.dev", "mode": "shadow",
                    "subagent_mode": "active", "subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
                    "subagent_thresholds": {"sonnet": 0.95, "haiku": 0.95},
                    "behavior_mode": "active", "behavior_model": "behavior-v1"}
+# run by OpenAI Codex (integrations/codex/install.py sets CLM_HOOK_RUNTIME=codex): Codex's payloads match
+# Claude Code's; its subagent task text is encrypted, so subagents are only logged, and the judge is Codex
+CODEX_DEFAULTS = {**{k: v for k, v in PLUGIN_DEFAULTS.items() if not k.startswith("subagent_")},
+                  "judge_name": "gpt-5.6-terra",
+                  "judge_cmd": "codex exec --skip-git-repo-check --ephemeral -s read-only -m gpt-5.6-terra "
+                               "-c model_reasoning_effort=low -c features.hooks=false -c mcp_servers={} -"}
 PLUGIN_OPTIONS = {"api_key": "api_key", "base_url": "base_url"}
 PLUGIN_SWITCHES = {"tool_gate": "mode", "subagent_downgrades": "subagent_mode", "behavior_checks": "behavior_mode"}
 RUBRICS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rubrics")
@@ -181,8 +187,12 @@ def raw_log(event: dict, path: str) -> None:
 
 
 def data_dir() -> str:
-    """Local state: the plugin's data dir when installed as a plugin, else ~/.config/clm."""
-    return os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.config/clm")
+    """Local state: the plugin's data dir (Claude Code), ~/.codex/clm (Codex), else ~/.config/clm."""
+    if os.environ.get("CLAUDE_PLUGIN_DATA"):
+        return os.environ["CLAUDE_PLUGIN_DATA"]
+    if os.environ.get("CLM_HOOK_RUNTIME") == "codex":
+        return os.path.expanduser("~/.codex/clm")
+    return os.path.expanduser("~/.config/clm")
 
 
 def paused() -> bool:
@@ -193,13 +203,20 @@ def load_config() -> dict:
     """DEFAULTS < (as a plugin) PLUGIN_DEFAULTS < the config file < the plugin's settings < env."""
     cfg = dict(DEFAULTS)
     plugin = bool(os.environ.get("CLAUDE_PLUGIN_ROOT"))
+    codex = os.environ.get("CLM_HOOK_RUNTIME") == "codex"
     if plugin:
         cfg.update(PLUGIN_DEFAULTS)
+    if codex:
+        cfg.update(CODEX_DEFAULTS)
     path = os.environ.get("CLM_HOOK_CONFIG") or os.path.expanduser("~/.config/clm/claude-code.json")
     try:
         with open(path, encoding="utf-8") as f:
-            cfg.update(json.load(f))
-    except (OSError, ValueError):
+            file_cfg = json.load(f)
+        runtime = file_cfg.pop("codex", None) or {}            # {"codex": {...}}: Codex-only overrides
+        cfg.update(file_cfg)
+        if codex:
+            cfg.update(runtime)
+    except (OSError, ValueError, AttributeError):
         pass
     if plugin:
         for opt, key in PLUGIN_OPTIONS.items():
@@ -514,7 +531,7 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
     """Ask CLM about each behavior in the turn that just ended. -> Stop hook output, or None."""
     sub = event.get("hook_event_name") == "SubagentStop"
     tr = CB.trace_of(event.get("agent_transcript_path") if sub else event.get("transcript_path"),
-                     event.get("last_assistant_message"))
+                     event.get("last_assistant_message"), event.get("turn_id"))
     if not tr:
         return None
     state = redact(CB.render(*tr))
@@ -567,7 +584,7 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
         return None
     flagged = ", ".join(f.split(" (")[0] for f in flags)
     return {"decision": "block",
-            "systemMessage": note(event, "behavior", f"flagged {flagged}; Claude was asked to check before stopping"),
+            "systemMessage": note(event, "behavior", f"flagged {flagged}; the agent was asked to check before stopping"),
             "reason": "CLM behavior check flagged this turn. " + " ".join(f"- {f}" for f in flags)
                       + " If a flag is wrong, say so in one sentence and stop."}
 
@@ -576,7 +593,8 @@ def status() -> str:
     cfg = load_config()
     state = "PAUSED (/clm:on resumes)" if paused() else "OFF" if cfg.get("mode") not in ("shadow", "active") else "on"
     lines = [f"CLM hook: {state}; "
-             f"tool calls {cfg.get('mode')}, subagent models {cfg.get('subagent_mode')}, "
+             f"tool calls {cfg.get('mode')}, subagent models "
+             f"{'logged only (Codex)' if os.environ.get('CLM_HOOK_RUNTIME') == 'codex' else cfg.get('subagent_mode')}, "
              f"behavior checks {cfg.get('behavior_mode')}; server {cfg.get('base_url') or 'NOT SET'}; "
              f"key {'set' if cfg.get('api_key') else 'NOT SET (plugin settings: api_key)'}"]
     try:

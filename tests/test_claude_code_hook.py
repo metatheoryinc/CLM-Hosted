@@ -663,7 +663,7 @@ def test_a_behavior_block_tells_the_user(run, tmp_path):
     probs["stale_task"] = {"present": 0.97, "absent": 0.02, "not_observable": 0.01}
     p, _, _ = run(stop(tmp_path), extra={"behavior_mode": "active"}, probs=probs)
     out = json.loads(p.stdout)
-    assert out["decision"] == "block" and out["systemMessage"].startswith("CLM: flagged stale_task")
+    assert out["decision"] == "block" and out["systemMessage"].startswith("CLM: flagged stale_task; the agent was asked")
 
 
 def test_pause_resume_and_status(run, tmp_path):
