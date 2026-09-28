@@ -13,7 +13,8 @@ of [docs/ROUTING.md](../../docs/ROUTING.md): shadow first, measure, then let CLM
   Claude. CLM never approves anything, so it can only make Claude Code stricter; on
   any error or after `timeout` (1.5 s) the call goes to Claude Code as usual.
 
-It installs as a Claude Code plugin (below) and does nothing until you install it.
+It installs as a Claude Code plugin (below) and does nothing until you install it. For a short tour with three real examples and the measured results, open
+[docs/demo/index.html](../../docs/demo/index.html) in a browser.
 
 ## Install
 
