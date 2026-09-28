@@ -101,14 +101,16 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
             # an unsure tool call that leans risky goes to Jev instead of the Opus judge
             "jev_api_key": None, "jev_base_url": "https://api.typesafe.ai", "jev_model": "jev-latest",
             "jev_timeout": 3, "jev_trace_chars": 20000, "behavior_ensemble_threshold": 0.7,
-            "jev_tool_threshold": 0.7}
+            "jev_tool_threshold": 0.7,
+            # leave this share of would-be subagent downgrades on the original model, to measure savings
+            "subagent_holdout": 0.0}
 STOP_EVENTS = ("Stop", "SubagentStop")
 # installed as a Claude Code plugin: the tuned heads on the shared stack, and the plugin's own settings
 PLUGIN_DEFAULTS = {"base_url": "https://clm.metatheory.dev", "mode": "shadow",
                    "model": "tool-risk-v1", "calibrate": "none", "threshold": 0.9,
                    "subagent_mode": "active", "subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
                    "subagent_thresholds": {"sonnet": 0.95, "haiku": 0.95},
-                   "behavior_mode": "active", "behavior_model": "behavior-v1"}
+                   "behavior_mode": "active", "behavior_model": "behavior-v1", "subagent_holdout": 0.1}
 # run by OpenAI Codex (integrations/codex/install.py sets CLM_HOOK_RUNTIME=codex): Codex's payloads match
 # Claude Code's; its subagent task text is encrypted, so subagents are only logged, and the judge is Codex
 CODEX_DEFAULTS = {**{k: v for k, v in PLUGIN_DEFAULTS.items() if not k.startswith("subagent_")},
@@ -458,6 +460,72 @@ def tier_of(model: str | None) -> str | None:
     return next((tier for name, tier in TIERS if name in m), None)
 
 
+def usage_of(path: str | None) -> dict:
+    """Tokens a run used, per model: {model: {input, cache_write, cache_read, output, calls}}.
+
+    Claude Code transcripts repeat a streamed message on several lines with the same id, so each
+    message id counts once. A Codex rollout keeps a running total (token_count), so the last one counts.
+    """
+    out: dict = {}
+    if not path or not os.path.exists(path):
+        return out
+
+    def add(model, **kw):
+        row = out.setdefault(model or "unknown", {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "calls": 0})
+        for k, v in kw.items():
+            row[k] += int(v or 0)
+
+    events = CB._read_jsonl(path)
+    if events and events[0].get("type") == "session_meta":
+        model, last = None, None
+        for e in events:
+            pl = e.get("payload") or {}
+            if e.get("type") == "turn_context":
+                model = pl.get("model") or model
+            elif e.get("type") == "event_msg" and pl.get("type") == "token_count":
+                last = (model, (pl.get("info") or {}).get("total_token_usage")) if (pl.get("info") or {}).get("total_token_usage") else last
+        if last:
+            m, u = last
+            cached = int(u.get("cached_input_tokens") or 0)
+            add(m, input=int(u.get("input_tokens") or 0) - cached, cache_read=cached, output=u.get("output_tokens"), calls=0)
+        return out
+    # the logged output_tokens is a mid-stream snapshot, so output is also estimated from what was
+    # written (text and tool calls, ~4 characters a token); hidden thinking is not visible either way
+    msgs: dict = {}
+    for e in events:
+        m = e.get("message") if e.get("type") == "assistant" else None
+        if not (isinstance(m, dict) and m.get("id") and isinstance(m.get("usage"), dict) and m.get("model") != "<synthetic>"):
+            continue
+        row = msgs.setdefault(m["id"], {"model": m.get("model"), "usage": {}, "chars": 0, "reported": 0})
+        row["usage"] = m["usage"]
+        row["reported"] = max(row["reported"], int(m["usage"].get("output_tokens") or 0))
+        for b in m.get("content") or []:
+            if isinstance(b, dict):
+                row["chars"] += len(b.get("text") or "") + (len(json.dumps(b.get("input"))) if b.get("type") == "tool_use" else 0)
+    for r in msgs.values():
+        u = r["usage"]
+        add(r["model"], input=u.get("input_tokens"), cache_write=u.get("cache_creation_input_tokens"),
+            cache_read=u.get("cache_read_input_tokens"), output=max(r["reported"], (r["chars"] + 3) // 4), calls=1)
+    for row in out.values():
+        row["output_estimated"] = True
+    return out
+
+
+def session_model(path: str | None) -> str | None:
+    """The model the session's own turns ran on (what a subagent inherits when no model is set)."""
+    model = None
+    for e in CB._read_jsonl(path) if path and os.path.exists(path) else []:
+        m = e.get("message") if e.get("type") == "assistant" else None
+        if isinstance(m, dict) and m.get("model") and m["model"] != "<synthetic>":
+            model = m["model"]
+    return model
+
+
+def held_out(tool_use_id: str, share: float) -> bool:
+    """Deterministic: the same call is always in or out of the holdout."""
+    return share > 0 and int(hashlib.sha1(tool_use_id.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF < share
+
+
 def subagent_result(event: dict) -> list[dict]:
     """After an Agent call: the tier that actually ran (baseline) and what the run cost (outcome).
 
@@ -472,6 +540,10 @@ def subagent_result(event: dict) -> list[dict]:
                     "resolved_model": tr.get("resolvedModel"), "total_tokens": tr.get("totalTokens"),
                     "output_tokens": usage.get("output_tokens"), "duration_ms": tr.get("totalDurationMs"),
                     "tool_uses": tr.get("totalToolUseCount"), "tool_stats": tr.get("toolStats")}}]
+    tp = event.get("transcript_path")
+    if tr.get("agentId") and tp:          # the subagent's own transcript sits next to the session's
+        out[0]["run"]["usage"] = usage_of(os.path.join(os.path.splitext(tp)[0], "subagents", f"agent-{tr['agentId']}.jsonl"))
+    out[0]["run"]["parent_model"] = session_model(tp)
     tier = tier_of(tr.get("resolvedModel"))
     if tier:
         out.append({"event": "baseline", "id": rid, "label": tier, "rank": 2, "created_at": t})
@@ -499,6 +571,14 @@ def post_with_escalation(cfg: dict, rec: dict, esc: dict | None) -> None:
 
 def run_background(payload: dict) -> None:
     cfg, event = load_config(), payload.get("event")
+    if payload["kind"] == "codex_usage":
+        post(cfg, "/v1/decisions", {"id": f"{event.get('session_id')}:{event.get('agent_id')}:usage",
+                                    "workflow": "usage/codex-subagents", "created_at": now(), "questions": {},
+                                    "state": {"agent_type": event.get("agent_type")},
+                                    "meta": {"session_id": event.get("session_id"), "agent_type": event.get("agent_type"),
+                                             "parent_model": event.get("model")},
+                                    "usage": usage_of(event.get("agent_transcript_path"))}, 10)
+        return
     if payload["kind"] == "behavior":
         for rec, esc in payload["items"]:
             post_with_escalation(cfg, rec, esc)
@@ -508,7 +588,7 @@ def run_background(payload: dict) -> None:
         if "applied" in payload:
             acted = payload.get("acted") or ("clm" if payload["applied"] else "baseline")
             rec.update(mode="active", threshold=cfg["subagent_threshold"], acted=acted)
-            rec["meta"].update(applied_model=payload["applied"], why=payload["why"])
+            rec["meta"].update(applied_model=payload["applied"], why=payload["why"], holdout=payload.get("holdout"))
         post_with_escalation(cfg, rec, payload.get("escalation"))
     elif payload["kind"] == "record":
         clm = payload.get("clm") or classify(cfg, payload["state"], timeout=10)
@@ -724,6 +804,9 @@ def main() -> int:
                 out = check_behaviors(event, cfg, key)
                 if out:
                     print(json.dumps(out))
+        if (name == "SubagentStop" and os.environ.get("CLM_HOOK_RUNTIME") == "codex" and event.get("agent_transcript_path")
+                and first_claim(dict(event, tool_use_id=f"usage:{event.get('agent_id')}"))):
+            background({"kind": "codex_usage", "event": event})
         if name in RAW_EVENTS:                       # no tool_use_id: dedupe on the subagent's id
             if cfg.get("raw_log") and first_claim(dict(event, tool_use_id=event.get("agent_id"))):
                 raw_log(event, cfg["raw_log_path"])
@@ -774,8 +857,12 @@ def main() -> int:
                         if esc.get("label"):
                             model, why = downgrade_to(esc["label"])
                             why, acted = f"judge ({esc['judge']}): {why}", "judge" if model else None
+                    held = None
+                    if model and held_out(event["tool_use_id"], float(cfg.get("subagent_holdout") or 0)):
+                        held, model = model, None          # measure: this one keeps the original model
+                        why, acted = f"holdout: would have run on {held}", "holdout"
                     background({"kind": "subagent", "event": event, "state": sub, "clm": clm_s,
-                                "applied": model, "why": why, "escalation": esc, "acted": acted})
+                                "applied": model, "why": why, "escalation": esc, "acted": acted, "holdout": held})
                     if model:
                         out = out or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
                         out["hookSpecificOutput"]["updatedInput"] = {**event["tool_input"], "model": model}

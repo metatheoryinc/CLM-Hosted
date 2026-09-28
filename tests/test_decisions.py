@@ -474,3 +474,47 @@ def test_the_labeler_may_say_not_observable_and_writes_nothing_for_it(tmp_path, 
     assert "gold" not in {r["id"]: r for r in D.merge(D.read_jsonl(str(src)))}["r11"]
     cli(["label", str(src), "--labeler", labeler, "--dry-run"])
     assert "- not_observable: the item does not contain enough" in capsys.readouterr().out
+
+
+
+# ── cost ─────────────────────────────────────────────────────────────────────
+
+from clm.decisions_cli import cost_of, cost_summary, load_prices, price_of  # noqa: E402
+
+PRICES = {"updated": "t", "models": {"claude-opus-5-5": {"input": 4, "cache_write": 5, "cache_read": 0.2, "output": 20},
+                                     "claude-sonnet-5": {"input": 2, "cache_write": 2.5, "cache_read": 0.2, "output": 10},
+                                     "gpt-5.6-terra": {"input": 2, "cache_write": 2, "cache_read": 0.2, "output": 12}}}
+TOK = {"input": 1_000_000, "cache_write": 0, "cache_read": 0, "output": 100_000}
+
+
+def sub_rec(i, meta, model="claude-sonnet-5", parent="claude-opus-5-5", status="completed"):
+    return {"id": f"s{i}", "workflow": "routing/claude-code-subagents", "questions": {}, "meta": meta,
+            "outcome": [{"event": "outcome", "run": {"status": status, "usage": {model: TOK}, "parent_model": parent}}]}
+
+
+def test_prices_match_dated_and_variant_ids():
+    assert price_of("claude-opus-5-5[1m]", PRICES)["input"] == 4 and price_of("claude-sonnet-5-20260101", PRICES)
+    assert price_of("mystery", PRICES) is None and cost_of({"mystery": TOK}, PRICES) is None
+    assert cost_of({"claude-sonnet-5": TOK}, PRICES) == pytest.approx(3.0)       # 1M x $2 + 0.1M x $10
+    assert cost_of({"claude-sonnet-5": TOK}, PRICES, "claude-opus-5-5") == pytest.approx(6.0)
+    assert set(load_prices()["models"]) >= {"claude-opus-5-5", "claude-haiku-4-5", "gpt-5.6-terra"}
+
+
+def test_cost_summary_estimates_savings_and_holds_the_holdout_back_until_it_is_big_enough():
+    recs = [sub_rec(0, {"applied_model": "sonnet"}), sub_rec(1, {"applied_model": "sonnet"}),
+            sub_rec(2, {"holdout": "sonnet"}, model="claude-opus-5-5"), sub_rec(3, {}, model="claude-opus-5-5"),
+            {"id": "old", "questions": {}, "meta": {}, "outcome": [{"event": "outcome", "run": {"status": "completed"}}]}]
+    codex = [{"id": "c", "usage": {"gpt-5.6-terra": TOK}}]
+    s = cost_summary(recs, codex, PRICES)
+    assert s["savings"]["runs"] == 2 and s["savings"]["saved"] == pytest.approx(6.0)   # 2 x ($6 - $3)
+    assert s["savings"]["saved_share"] == pytest.approx(0.5)
+    assert s["groups"]["holdout"]["n"] == 1 and s["holdout_check"] is None
+    assert s["runs_without_usage"] == 1 and s["codex"]["cost"] == pytest.approx(3.2)
+
+
+def test_the_cost_command_prints(tmp_path, capsys):
+    src = tmp_path / "d.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in [sub_rec(0, {"applied_model": "sonnet"})]) + "\n")
+    cli(["cost", str(src)])
+    out = capsys.readouterr().out
+    assert "estimated savings from downgrades: $3.00 (50% of $6.00)" in out and "lower bound" in out

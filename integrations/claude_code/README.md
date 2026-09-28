@@ -216,6 +216,27 @@ depend on the middle of a long turn are its weak spot. Every answer is logged as
 
 ## Measure
 
+### What it costs and what downgrades save
+
+```bash
+clm-decisions cost https://clm.metatheory.dev
+```
+
+When a subagent finishes, the hook adds up what it used from its own transcript (fresh input, cache
+writes, cache reads and output, per model) and records the model the session runs on, which is what
+the subagent would have inherited. `clm-decisions cost` prices those tokens with
+[prices.json](../../src/clm/prices.json) (Anthropic and OpenAI list prices; update it when prices
+change) and reports spend for downgraded, held-out and unchanged runs, plus the estimated saving:
+each downgraded run's tokens priced at the model it would have run on, minus what it cost. Codex
+subagents are logged as `usage/codex-subagents` and reported as spend (Codex has no downgrades).
+
+The estimate assumes the bigger model would have used the same tokens. To check that, the plugin
+leaves 10% of would-be downgrades on the original model (`subagent_holdout`, chosen by the call's id);
+once there are 20 held-out runs, the report compares their cost per run and completion rate with the
+downgraded runs. Output tokens are estimated from what was written, and hidden thinking is not
+visible, so costs are a lower bound. On a subscription the saving is usage-limit headroom, not dollars.
+
+
 ```bash
 clm-decisions report https://clm.metatheory.dev --workflow routing/claude-code-tools
 ```

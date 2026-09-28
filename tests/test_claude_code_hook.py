@@ -258,7 +258,7 @@ def test_agent_results_report_the_tier_that_ran_and_the_cost(run):
     run_ = by[("outcome", "toolu_done:model")]["run"]
     assert run_ == {"status": "completed", "resolved_model": "claude-haiku-4-5-20251001", "total_tokens": 37739,
                     "output_tokens": 384, "duration_ms": 6817, "tool_uses": 1,
-                    "tool_stats": {"readCount": 1, "editFileCount": 0}}
+                    "tool_stats": {"readCount": 1, "editFileCount": 0}, "parent_model": None}
     assert "secret answer" not in json.dumps(got)                              # the subagent's output stays local
 
 
@@ -780,3 +780,55 @@ def test_shadow_logs_jev_on_the_calls_it_would_decide(run, fake_jev):
     assert p.stdout == ""
     rec = next(r for r in clm.wait(1) if r.get("workflow") == "routing/claude-code-tools")
     assert rec["acted"] == "baseline" and rec["escalation"]["label"] == "review"
+
+
+
+# ── cost accounting ──────────────────────────────────────────────────────────
+
+def claude_transcript(path, model, lines):
+    path.write_text("\n".join(json.dumps({"type": "assistant", "message": {"id": i, "model": model, "usage": u,
+                                                                          "content": c}}) for i, u, c in lines) + "\n")
+
+
+def test_usage_counts_each_streamed_message_once_and_estimates_output(tmp_path):
+    f = tmp_path / "agent.jsonl"
+    u = {"input_tokens": 10, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 5000, "output_tokens": 3}
+    claude_transcript(f, "claude-sonnet-5", [("m1", u, [{"type": "thinking", "thinking": ""}]),
+                                             ("m1", u, [{"type": "text", "text": "x" * 400}]),
+                                             ("m2", dict(u, output_tokens=50), [{"type": "tool_use", "input": {"a": 1}}])])
+    got = hook.usage_of(str(f))["claude-sonnet-5"]
+    assert (got["input"], got["cache_write"], got["cache_read"], got["calls"]) == (20, 2000, 10000, 2)
+    assert got["output"] == 100 + 50 and got["output_estimated"] is True        # 400 chars ~ 100 tokens; m2 as reported
+
+
+def test_usage_of_a_codex_rollout_takes_the_running_total(tmp_path):
+    f = tmp_path / "rollout.jsonl"
+    ev = lambda t, p: {"type": t, "payload": p}                                    # noqa: E731
+    tc = lambda i, c, o: ev("event_msg", {"type": "token_count", "info": {"total_token_usage":  # noqa: E731
+                                             {"input_tokens": i, "cached_input_tokens": c, "output_tokens": o}}})
+    f.write_text("\n".join(json.dumps(x) for x in [ev("session_meta", {}), ev("turn_context", {"model": "gpt-5.6-terra"}),
+                                                   tc(100, 60, 5), tc(900, 700, 40)]) + "\n")
+    assert hook.usage_of(str(f)) == {"gpt-5.6-terra": {"input": 200, "cache_write": 0, "cache_read": 700, "output": 40, "calls": 0}}
+
+
+def test_a_finished_subagent_records_its_usage_and_the_session_model(run, tmp_path):
+    session = tmp_path / "s1.jsonl"
+    session.write_text(json.dumps({"type": "assistant", "message": {"id": "p", "model": "claude-opus-5-5", "content": []}}) + "\n")
+    (tmp_path / "s1" / "subagents").mkdir(parents=True)
+    claude_transcript(tmp_path / "s1" / "subagents" / "agent-a1.jsonl", "claude-sonnet-5",
+                      [("m1", {"input_tokens": 1, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 0,
+                               "output_tokens": 7}, [])])
+    e = dict(agent_call(tid="toolu_u"), hook_event_name="PostToolUse", transcript_path=str(session),
+             tool_response={"status": "completed", "agentId": "a1", "resolvedModel": "claude-sonnet-5"})
+    _, _, clm = run(e)
+    out = next(x for x in clm.wait(3) if x.get("event") == "outcome" and x["id"] == "toolu_u:model")["run"]
+    assert out["parent_model"] == "claude-opus-5-5"
+    assert out["usage"]["claude-sonnet-5"]["cache_write"] == 100
+
+
+def test_the_holdout_keeps_the_original_model(run):
+    p, _, clm = run(agent_call(tid="toolu_h"), probs=SONNET, extra={**ACTIVE, "subagent_holdout": 1.0})
+    assert p.stdout == ""                                                      # no rewrite for a held-out call
+    sub = next(r for r in clm.wait(3) if r.get("workflow") == "routing/claude-code-subagents")
+    assert sub["meta"]["holdout"] == "sonnet" and sub["acted"] == "holdout" and sub["meta"]["applied_model"] is None
+    assert hook.held_out("toolu_h", 0.0) is False

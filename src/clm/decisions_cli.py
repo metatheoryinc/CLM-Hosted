@@ -434,10 +434,136 @@ def label(args) -> None:
               f"{n_bad} skipped (missing or invalid answers)")
 
 
+# ── cost ─────────────────────────────────────────────────────────────────────
+
+SUBAGENTS = "routing/claude-code-subagents"
+CODEX_USAGE = "usage/codex-subagents"
+MIN_HOLDOUT = 20                     # holdout runs needed before comparing it with the downgraded runs
+
+
+def load_prices(path: str | None = None) -> dict:
+    if path:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    from importlib.resources import files
+    return json.loads(files("clm").joinpath("prices.json").read_text(encoding="utf-8"))
+
+
+def price_of(model: str | None, prices: dict) -> dict | None:
+    """Exact id, else the longest listed id the model starts with (dated and [1m] variants)."""
+    table = prices["models"]
+    m = (model or "").lower()
+    if m in table:
+        return table[m]
+    hits = [k for k in table if m.startswith(k)]
+    return table[max(hits, key=len)] if hits else None
+
+
+def cost_of(usage: dict, prices: dict, as_model: str | None = None) -> float | None:
+    """USD for a {model: tokens} usage; as_model prices every token as that model (the counterfactual)."""
+    total = 0.0
+    for model, u in (usage or {}).items():
+        p = price_of(as_model or model, prices)
+        if p is None:
+            return None
+        total += sum(u.get(k, 0) * p[k] for k in ("input", "cache_write", "cache_read", "output")) / 1e6
+    return total
+
+
+def _run(r: dict) -> dict | None:
+    return next((o["run"] for o in reversed(r.get("outcome", [])) if isinstance(o.get("run"), dict)), None)
+
+
+def cost_summary(recs: list[dict], codex: list[dict], prices: dict) -> dict:
+    groups = {"downgraded": [], "holdout": [], "unchanged": []}
+    no_usage = 0
+    for r in recs:
+        run, meta = _run(r), r.get("meta") or {}
+        if not run or not run.get("usage"):
+            no_usage += 1
+            continue
+        g = "holdout" if meta.get("holdout") else "downgraded" if meta.get("applied_model") else "unchanged"
+        groups[g].append({"id": r["id"], "usage": run["usage"], "status": run.get("status"),
+                          "parent": run.get("parent_model"), "cost": cost_of(run["usage"], prices),
+                          "would_have": cost_of(run["usage"], prices, run.get("parent_model"))
+                          if g == "downgraded" and run.get("parent_model") else None})
+    out = {"prices_updated": prices.get("updated"), "runs_without_usage": no_usage, "groups": {}}
+    for g, rows in groups.items():
+        priced = [x for x in rows if x["cost"] is not None]
+        out["groups"][g] = {
+            "n": len(rows), "priced": len(priced), "cost": sum(x["cost"] for x in priced),
+            "mean_cost": statistics.fmean(x["cost"] for x in priced) if priced else None,
+            "completed": sum(x["status"] == "completed" for x in rows),
+            "tokens": sum(sum(u.get(k, 0) for u in x["usage"].values() for k in ("input", "cache_write", "cache_read", "output"))
+                          for x in rows)}
+    d = [x for x in groups["downgraded"] if x["cost"] is not None and x["would_have"] is not None]
+    actual, would = sum(x["cost"] for x in d), sum(x["would_have"] for x in d)
+    out["savings"] = {"runs": len(d), "actual": actual, "would_have": would, "saved": would - actual,
+                      "saved_share": (would - actual) / would if would else None}
+    h, dn = out["groups"]["holdout"], out["groups"]["downgraded"]
+    out["holdout_check"] = ({"downgraded_mean": dn["mean_cost"], "holdout_mean": h["mean_cost"],
+                             "downgraded_completed": [dn["completed"], dn["n"]], "holdout_completed": [h["completed"], h["n"]]}
+                            if h["priced"] >= MIN_HOLDOUT and dn["priced"] else None)
+    by_model: dict = defaultdict(float)
+    for r in codex:
+        for model, u in (r.get("usage") or {}).items():
+            c = cost_of({model: u}, prices)
+            if c is not None:
+                by_model[model] += c
+    out["codex"] = {"runs": len(codex), "cost_by_model": dict(by_model), "cost": sum(by_model.values())}
+    return out
+
+
+def cost(args) -> None:
+    prices = load_prices(args.prices)
+    since = None
+    if args.days:
+        since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=args.days)).isoformat()
+    keep = lambda rs: [r for r in rs if not since or (r.get("created_at") or "") >= since]    # noqa: E731
+    recs, codex = keep(load(args.sources, SUBAGENTS)), keep(load(args.sources, CODEX_USAGE))
+    s = cost_summary(recs, codex, prices)
+    if args.json:
+        print(json.dumps(s, indent=2))
+        return
+    usd = lambda v: "-" if v is None else f"${v:,.2f}"                                        # noqa: E731
+    g = s["groups"]
+    print(f"== subagent spend{f' (last {args.days} days)' if args.days else ''}; prices as of {s['prices_updated']}")
+    for name, label in (("downgraded", "downgraded by CLM"), ("holdout", "holdout (left on the original)"),
+                        ("unchanged", "unchanged")):
+        x = g[name]
+        print(f"   {label:32} {x['n']:5d} runs  {usd(x['cost']):>10}  mean {usd(x['mean_cost']):>8}/run  "
+              f"completed {x['completed']}/{x['n']}")
+    sv = s["savings"]
+    if sv["runs"]:
+        print(f"   estimated savings from downgrades: {usd(sv['saved'])} ({sv['saved_share']:.0%} of {usd(sv['would_have'])}) "
+              f"over {sv['runs']} runs, pricing each run's tokens at the model it would have run on")
+    hc = s["holdout_check"]
+    if hc:
+        print(f"   holdout check: mean {usd(hc['downgraded_mean'])}/run downgraded vs {usd(hc['holdout_mean'])}/run held out; "
+              f"completed {hc['downgraded_completed'][0]}/{hc['downgraded_completed'][1]} vs "
+              f"{hc['holdout_completed'][0]}/{hc['holdout_completed'][1]}")
+    else:
+        print(f"   holdout check: needs {MIN_HOLDOUT} priced holdout runs (have {g['holdout']['priced']})")
+    if s["runs_without_usage"]:
+        print(f"   {s['runs_without_usage']} runs were logged before token accounting and are not counted")
+    c = s["codex"]
+    if c["runs"]:
+        print(f"== Codex subagents: {c['runs']} runs, {usd(c['cost'])}  "
+              + "  ".join(f"{m} {usd(v)}" for m, v in sorted(c["cost_by_model"].items(), key=lambda kv: -kv[1])))
+    print("   Output tokens are estimated from what was written; hidden thinking is not counted, so costs are a lower "
+          "bound. API list prices: on a subscription the saving is usage-limit headroom, not dollars.")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="clm-decisions", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    cp = sub.add_parser("cost", help="what subagent runs cost and what CLM's downgrades saved")
+    cp.add_argument("sources", nargs="+", help="JsonlSink files and/or collector base URLs")
+    cp.add_argument("--prices", help="price table JSON (default: the packaged prices.json)")
+    cp.add_argument("--days", type=int, help="only runs from the last N days")
+    cp.add_argument("--json", action="store_true")
+    cp.set_defaults(fn=cost)
     for name, fn in (("report", report), ("export", export), ("label", label)):
         sp = sub.add_parser(name)
         sp.add_argument("sources", nargs="+", help="JsonlSink files and/or collector base URLs")

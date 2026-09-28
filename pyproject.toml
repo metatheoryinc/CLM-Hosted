@@ -56,7 +56,7 @@ Discord = "https://discord.gg/5dAQEDJBs"
 where = ["src"]
 
 [tool.setuptools.package-data]
-clm = ["py.typed", "static/*"]
+clm = ["py.typed", "static/*", "prices.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
