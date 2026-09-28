@@ -36,6 +36,7 @@ Claude Code asks for the plugin's settings when it is enabled (or later under `/
 | Cheaper subagent models | on | a subagent CLM is confident needs less runs on a cheaper model | log only |
 | Behavior checks | on | Claude may be asked to verify or fix something when a turn ends | log only |
 | Tool-call gate | off | a confident review/block forces the permission prompt or denies the call | log only |
+| Jev API key | not set | optional TypeSafe key: CLM and Jev together (below) | CLM alone, Opus judge |
 
 New sessions use it. In a session:
 
@@ -158,6 +159,26 @@ keeps the judge's answer and latency, and the answer is also written as a labell
 (`source: "llm:opus-escalation"`): the cases CLM found hard become training data for the
 next head. `clm-decisions report` summarizes the escalations. Use a different model as the
 judge than as the labeller, or the cascade is scored against the judge's own opinions.
+
+## With a Jev key
+
+Setting the optional **Jev API key** (plugin setting `jev_api_key`, or `"jev_api_key"` in the config
+file) adds TypeSafe's Jev as a second model, where it helped most in
+[our comparison](../../evaluation/README.md#clm-vs-jev):
+
+* **Behavior checks** ask CLM and Jev in parallel (about 0.5 s together; Jev gets a longer rendering
+  of the turn, `jev_trace_chars` = 20000) and act on the **average** p(present) from
+  `behavior_ensemble_threshold` (0.7). No Opus judge: Jev is the second opinion. On the benchmark's
+  held-out traces the average has F1 0.736 (CLM alone 0.648, Jev alone 0.626), and at 0.7 it is 90%
+  precise and finds 46% of the behaviors (CLM alone at 0.9: 86% and 36%).
+* **Unsure tool calls**: CLM decides alone from `threshold` 0.9; when it leans review/block below that,
+  Jev decides (`jev_tool_threshold` 0.7, about 200 ms) instead of the Opus judge. On the labelled calls
+  this catches 70% of review-worthy calls at 3.9 false flags per 100 (CLM alone at 0.7: 44%). In shadow
+  mode Jev's answer on those same calls is logged, so the report can show what it would have done.
+* Subagent tiers stay CLM only (CLM was more accurate there and never downgraded an Opus task).
+
+If Jev errors or times out (`jev_timeout`, 3 s), CLM decides alone with its own thresholds and judge.
+Records keep CLM's answer in `clm`, Jev's in `jev` and the average in `ensemble`.
 
 ## Behavior checks when a turn ends
 

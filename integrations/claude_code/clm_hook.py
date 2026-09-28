@@ -96,11 +96,16 @@ DEFAULTS = {"mode": "off", "base_url": None, "api_key": None, "threshold": 0.9, 
                          '--no-session-persistence --output-format json',
             # behavior checks when a turn or subagent stops
             "behavior_mode": "off", "behavior_model": "behavior-v1", "behavior_threshold": 0.9,
-            "behavior_escalate_from": 0.6, "behavior_timeout": 3, "behaviors_file": None}
+            "behavior_escalate_from": 0.6, "behavior_timeout": 3, "behaviors_file": None,
+            # Jev (TypeSafe), when a key is set: behavior checks act on the average of CLM and Jev, and
+            # an unsure tool call that leans risky goes to Jev instead of the Opus judge
+            "jev_api_key": None, "jev_base_url": "https://api.typesafe.ai", "jev_model": "jev-latest",
+            "jev_timeout": 3, "jev_trace_chars": 20000, "behavior_ensemble_threshold": 0.7,
+            "jev_tool_threshold": 0.7}
 STOP_EVENTS = ("Stop", "SubagentStop")
 # installed as a Claude Code plugin: the tuned heads on the shared stack, and the plugin's own settings
 PLUGIN_DEFAULTS = {"base_url": "https://clm.metatheory.dev", "mode": "shadow",
-                   "model": "tool-risk-v1", "calibrate": "none", "threshold": 0.7,
+                   "model": "tool-risk-v1", "calibrate": "none", "threshold": 0.9,
                    "subagent_mode": "active", "subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
                    "subagent_thresholds": {"sonnet": 0.95, "haiku": 0.95},
                    "behavior_mode": "active", "behavior_model": "behavior-v1"}
@@ -110,7 +115,7 @@ CODEX_DEFAULTS = {**{k: v for k, v in PLUGIN_DEFAULTS.items() if not k.startswit
                   "judge_name": "gpt-5.6-terra",
                   "judge_cmd": "codex exec --skip-git-repo-check --ephemeral -s read-only -m gpt-5.6-terra "
                                "-c model_reasoning_effort=low -c features.hooks=false -c mcp_servers={} -"}
-PLUGIN_OPTIONS = {"api_key": "api_key", "base_url": "base_url"}
+PLUGIN_OPTIONS = {"api_key": "api_key", "base_url": "base_url", "jev_api_key": "jev_api_key"}
 PLUGIN_SWITCHES = {"tool_gate": "mode", "subagent_downgrades": "subagent_mode", "behavior_checks": "behavior_mode"}
 RUBRICS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rubrics")
 TIER_RANK = {"haiku": 0, "sonnet": 1, "opus": 2}
@@ -263,6 +268,42 @@ def post(cfg: dict, path: str, body: dict, timeout: float):
                                           "Authorization": f"Bearer {cfg['api_key']}"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
+
+
+def jev(cfg: dict, state, questions: dict, timeout: float | None = None) -> dict:
+    """Ask Jev (TypeSafe's /v1/systemone, the same wire format as CLM). -> {qid: answer}, or {"error": ...}."""
+    t0 = time.perf_counter()
+    try:
+        req = urllib.request.Request(cfg["jev_base_url"].rstrip("/") + "/v1/systemone", method="POST",
+                                     data=json.dumps({"state": state, "model": cfg["jev_model"],
+                                                      "questions": questions}).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "clm-claude-code-hook/1",
+                                              "Authorization": f"Bearer {cfg['jev_api_key']}"})
+        with urllib.request.urlopen(req, timeout=float(timeout or cfg["jev_timeout"])) as r:
+            j = json.load(r)
+        return {"answers": j["answers"], "model": j.get("model", cfg["jev_model"]),
+                "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"[:300], "latency_ms": round((time.perf_counter() - t0) * 1000, 1)}
+
+
+def jev_tool(cfg: dict, state: dict) -> dict:
+    """Jev on an unsure tool call. -> an escalation record; ``label`` set only when Jev is confident it is risky."""
+    res = jev(cfg, state, {QID: {"type": "choice", "instructions": INSTRUCTIONS, "criteria": OPTIONS}})
+    a = jev_pick(res)
+    if not a:
+        return {"judge": "jev", "label": None, "error": res.get("error") or "no answer", "latency_ms": res.get("latency_ms")}
+    risky = a["choice"] != "allow" and a["probability"] >= float(cfg["jev_tool_threshold"])
+    return {"judge": "jev", "label": a["choice"] if risky else None, "answer": a["choice"],
+            "probability": a["probability"], "probabilities": a["probabilities"], "latency_ms": a["latency_ms"]}
+
+
+def jev_pick(res: dict, qid: str = QID) -> dict | None:
+    a = (res.get("answers") or {}).get(qid)
+    if not a:
+        return None
+    return {"model": res.get("model"), "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
+            "probabilities": a["probabilities"], "latency_ms": res.get("latency_ms")}
 
 
 def classify(cfg: dict, state: dict, timeout: float, instructions: str = INSTRUCTIONS,
@@ -471,6 +512,9 @@ def run_background(payload: dict) -> None:
         post_with_escalation(cfg, rec, payload.get("escalation"))
     elif payload["kind"] == "record":
         clm = payload.get("clm") or classify(cfg, payload["state"], timeout=10)
+        if ("escalation" not in payload and cfg.get("jev_api_key") and "error" not in clm and clm["choice"] != "allow"
+                and clm["probability"] < float(cfg["threshold"])):
+            payload["escalation"] = jev_tool(dict(cfg, jev_timeout=10), payload["state"])
         post_with_escalation(cfg, record(event, payload["state"], clm, cfg, payload.get("acted", "baseline")),
                              payload.get("escalation"))
     elif payload["kind"] == "subagent_result":
@@ -528,7 +572,7 @@ def load_behaviors(cfg: dict) -> dict:
 
 
 def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
-    """Ask CLM about each behavior in the turn that just ended. -> Stop hook output, or None."""
+    """Ask CLM (and Jev, with a key) about each behavior in the turn that just ended. -> Stop hook output."""
     sub = event.get("hook_event_name") == "SubagentStop"
     tr = CB.trace_of(event.get("agent_transcript_path") if sub else event.get("transcript_path"),
                      event.get("last_assistant_message"), event.get("turn_id"))
@@ -537,28 +581,49 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
     state = redact(CB.render(*tr))
     behaviors = load_behaviors(cfg)
     questions = {k: CB.question(v["definition"]) for k, v in behaviors.items()}
-    t0 = time.perf_counter()
-    try:
-        j = post(cfg, "/v1/systemone", {"state": state, "model": cfg["behavior_model"], "questions": questions},
-                 float(cfg["behavior_timeout"]))
-        answers, err = j["answers"], None
-    except Exception as e:  # noqa: BLE001
-        answers, err = {}, f"{type(e).__name__}: {e}"[:300]
-    ms = round((time.perf_counter() - t0) * 1000, 1)
+    use_jev = bool(cfg.get("jev_api_key"))
+
+    def ask_clm():
+        t0 = time.perf_counter()
+        try:
+            j = post(cfg, "/v1/systemone", {"state": state, "model": cfg["behavior_model"], "questions": questions},
+                     float(cfg["behavior_timeout"]))
+            return j["answers"], None, round((time.perf_counter() - t0) * 1000, 1)
+        except Exception as e:  # noqa: BLE001
+            return {}, f"{type(e).__name__}: {e}"[:300], round((time.perf_counter() - t0) * 1000, 1)
+
+    if use_jev:                                   # Jev reads a longer rendering of the same turn
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(2) as ex:
+            f_clm = ex.submit(ask_clm)
+            f_jev = ex.submit(jev, cfg, redact(CB.render(*tr, budget=int(cfg["jev_trace_chars"]))), questions)
+            (answers, err, ms), jres = f_clm.result(), f_jev.result()
+    else:
+        (answers, err, ms), jres = ask_clm(), {}
     active = cfg.get("behavior_mode") == "active"
     again = str(event.get("stop_hook_active")).lower() == "true"     # already continuing because of a stop hook
-    hi, lo = float(cfg["behavior_threshold"]), float(cfg["behavior_escalate_from"])
     clm = {}
     for k in behaviors:
         a = answers.get(k)
         clm[k] = ({"model": cfg["behavior_model"], "choice": a["choice"], "probability": float(a["probabilities"][a["choice"]]),
                    "probabilities": a["probabilities"], "latency_ms": ms} if a else
                   {"model": cfg["behavior_model"], "error": err or "no answer", "latency_ms": ms})
-    p = {k: float(c.get("probabilities", {}).get("present", 0)) for k, c in clm.items()}
+    jv = {k: jev_pick(jres, k) for k in behaviors} if use_jev else {}
+    present = lambda c: float((c or {}).get("probabilities", {}).get("present", 0))       # noqa: E731
+    p, who_of = {}, {}
+    for k in behaviors:
+        votes = [present(c) for c in (clm[k] if "error" not in clm[k] else None, jv.get(k)) if c]
+        p[k] = sum(votes) / len(votes) if votes else 0.0
+        who_of[k] = "CLM+Jev" if len(votes) == 2 else "Jev" if jv.get(k) else "CLM"
+    ensemble = any(who != "CLM" for who in who_of.values())
+    # thresholds: the average of CLM and Jev is less extreme than CLM alone, so it acts from a lower bar;
     # a behavior may set its own "threshold" / "escalate_from" (ones the head was not trained on score lower)
-    hi_of = {k: float(v.get("threshold", hi)) for k, v in behaviors.items()}
+    hi = float(cfg["behavior_ensemble_threshold"] if ensemble else cfg["behavior_threshold"])
+    lo = float(cfg["behavior_escalate_from"])
+    hi_of = {k: float(v.get("threshold", hi)) if not ensemble else hi for k, v in behaviors.items()}
     lo_of = {k: float(v.get("escalate_from", lo)) for k, v in behaviors.items()}
-    unsure = [k for k in behaviors if lo_of[k] <= p[k] < hi_of[k]] if active and not again else []
+    # without Jev, unsure behaviors go to the LLM judge; with Jev, the average is the second opinion
+    unsure = [k for k in behaviors if lo_of[k] <= p[k] < hi_of[k]] if active and not again and not ensemble else []
     esc = {}
     if unsure:
         from concurrent.futures import ThreadPoolExecutor
@@ -572,13 +637,17 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
         by = "clm" if p[k] >= hi_of[k] else "judge" if (esc.get(k) or {}).get("label") == "present" else None
         acted = by if active and not again and by else "baseline"
         if acted != "baseline":
-            who = f"p={p[k]:.2f}" if by == "clm" else "judge " + str(cfg.get("judge_name", "judge"))
+            who = f"{who_of[k]} p={p[k]:.2f}" if by == "clm" else "judge " + str(cfg.get("judge_name", "judge"))
             flags.append(f"{k} ({who}): {v['fix']}")
-        items.append([{"id": f"{key}:{k}", "workflow": CB.WORKFLOW, "created_at": now(),
-                       "mode": cfg.get("behavior_mode"), "threshold": hi_of[k], "state": state,
-                       "questions": {QID: questions[k]}, "clm": clm[k], "acted": acted,
-                       "meta": {"session_id": event.get("session_id"), "behavior": k, "hook_event": event.get("hook_event_name"),
-                                "agent_type": event.get("agent_type"), "stop_hook_active": again}}, esc.get(k)])
+        rec = {"id": f"{key}:{k}", "workflow": CB.WORKFLOW, "created_at": now(),
+               "mode": cfg.get("behavior_mode"), "threshold": hi_of[k], "state": state,
+               "questions": {QID: questions[k]}, "clm": clm[k], "acted": acted,
+               "meta": {"session_id": event.get("session_id"), "behavior": k, "hook_event": event.get("hook_event_name"),
+                        "agent_type": event.get("agent_type"), "stop_hook_active": again}}
+        if use_jev:
+            rec["jev"] = jv.get(k) or {"error": jres.get("error") or "no answer", "latency_ms": jres.get("latency_ms")}
+            rec["ensemble"] = {"present": round(p[k], 4), "from": who_of[k]}
+        items.append([rec, esc.get(k)])
     background({"kind": "behavior", "items": items})
     if not flags:
         return None
@@ -596,7 +665,8 @@ def status() -> str:
              f"tool calls {cfg.get('mode')}, subagent models "
              f"{'logged only (Codex)' if os.environ.get('CLM_HOOK_RUNTIME') == 'codex' else cfg.get('subagent_mode')}, "
              f"behavior checks {cfg.get('behavior_mode')}; server {cfg.get('base_url') or 'NOT SET'}; "
-             f"key {'set' if cfg.get('api_key') else 'NOT SET (plugin settings: api_key)'}"]
+             f"key {'set' if cfg.get('api_key') else 'NOT SET (plugin settings: api_key)'}; "
+             f"Jev {'on (behavior checks averaged, unsure tool calls)' if cfg.get('jev_api_key') else 'off'}"]
     try:
         with open(os.path.join(data_dir(), "actions.jsonl"), encoding="utf-8") as f:
             acts = [json.loads(x) for x in f if x.strip()]
@@ -670,8 +740,18 @@ def main() -> int:
                 if out:
                     out["systemMessage"] = note(event, "tool", f"{out['hookSpecificOutput']['permissionDecision']} "
                                                 f"{event.get('tool_name')} (p={clm['probability']:.2f})")
-                # narrow escalation: only when CLM leans review/block but is below the threshold
-                if out is None and cfg.get("tool_escalate") and "error" not in clm and clm["choice"] != "allow":
+                # narrow escalation: only when CLM leans review/block but is below the threshold;
+                # to Jev when there is a key (about 200 ms), else to the LLM judge if tool_escalate is on
+                if out is None and "error" not in clm and clm["choice"] != "allow" and cfg.get("jev_api_key"):
+                    esc = jev_tool(cfg, state)
+                    if esc.get("label"):
+                        out = decide({"choice": esc["label"], "probability": 1.0}, cfg,
+                                     who=f"Jev (p={esc['probability']:.2f}), asked because CLM was unsure,")
+                        acted = "jev" if out else None
+                        if out:
+                            out["systemMessage"] = note(event, "tool", f"{out['hookSpecificOutput']['permissionDecision']} "
+                                                        f"{event.get('tool_name')} (Jev p={esc['probability']:.2f})")
+                elif out is None and cfg.get("tool_escalate") and "error" not in clm and clm["choice"] != "allow":
                     esc = judge(cfg, state, INSTRUCTIONS, OPTIONS, "tools.md")
                     if esc.get("label"):
                         out = decide({"choice": esc["label"], "probability": 1.0}, cfg,

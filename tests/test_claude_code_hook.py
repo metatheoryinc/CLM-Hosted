@@ -563,7 +563,7 @@ def test_active_blocks_the_stop_on_a_confident_flag(run, tmp_path):
     probs["unverified_success"] = {"present": 0.95, "absent": 0.04, "not_observable": 0.01}
     p, _, clm = run(stop(tmp_path), extra={"behavior_mode": "active"}, probs=probs)
     out = json.loads(p.stdout)
-    assert out["decision"] == "block" and "unverified_success (p=0.95)" in out["reason"]
+    assert out["decision"] == "block" and "unverified_success (CLM p=0.95)" in out["reason"]
     assert "Run the relevant test" in out["reason"] and "say so in one sentence and stop" in out["reason"]
     rec = next(r for r in clm.wait(len(BEHAVIORS)) if r["meta"]["behavior"] == "unverified_success")
     assert rec["acted"] == "clm"
@@ -696,3 +696,87 @@ def test_the_plugin_files_agree_with_the_hook():
                           "PostToolUse", "PostToolUseFailure", "SubagentStart"}
     market = json.load(open(os.path.join(os.path.dirname(os.path.dirname(root)), ".claude-plugin", "marketplace.json")))
     assert market["plugins"][0]["source"] == "./integrations/claude_code"
+
+
+# ── Jev: CLM + Jev behavior checks, Jev for unsure tool calls ────────────────
+
+@pytest.fixture
+def fake_jev():
+    servers = []
+
+    def make(probs=None, delay=0.0):
+        s = FakeCLM(probs, delay)
+        servers.append(s)
+        return s
+    yield make
+    for s in servers:
+        s.srv.shutdown()
+
+
+def jev_cfg(j, **kw):
+    return {"jev_api_key": "jev-key", "jev_base_url": j.url, **kw}
+
+
+def behavior_probs(present):
+    probs = {k: ABSENT for k in BEHAVIORS}
+    probs["stale_task"] = {"present": present, "absent": 1 - present - 0.01, "not_observable": 0.01}
+    return probs
+
+
+def test_behavior_checks_act_on_the_average_of_clm_and_jev(run, tmp_path, fake_jev, fake_judge):
+    j = fake_jev(behavior_probs(0.9))
+    p, _, clm = run(stop(tmp_path), probs=behavior_probs(0.6),
+                    extra={"behavior_mode": "active", "judge_cmd": fake_judge["cmd"], **jev_cfg(j)},
+                    env_extra={"FAKE_JUDGE_LABEL": "present", "FAKE_JUDGE_LOG": fake_judge["log"]})
+    out = json.loads(p.stdout)
+    assert "stale_task (CLM+Jev p=0.75)" in out["reason"]
+    assert fake_judge["calls"]() == 0                       # Jev is the second opinion: no Opus judge
+    [(auth, body)] = j.systemone
+    assert auth == "Bearer jev-key" and body["model"] == "jev-latest" and set(body["questions"]) == set(BEHAVIORS)
+    assert len(body["state"]) >= len(clm.systemone[0][1]["state"])     # Jev may read the longer rendering
+    rec = next(r for r in clm.wait(len(BEHAVIORS)) if r["meta"]["behavior"] == "stale_task")
+    assert rec["acted"] == "clm" and rec["ensemble"] == {"present": 0.75, "from": "CLM+Jev"}
+    assert rec["jev"]["probabilities"]["present"] == 0.9 and "jev-key" not in json.dumps(rec)
+
+
+def test_below_the_average_threshold_nothing_happens(run, tmp_path, fake_jev):
+    j = fake_jev(behavior_probs(0.5))
+    p, _, _ = run(stop(tmp_path), probs=behavior_probs(0.6), extra={"behavior_mode": "active", **jev_cfg(j)})
+    assert p.stdout == ""
+
+
+def test_if_jev_fails_clm_decides_alone(run, tmp_path):
+    p, _, clm = run(stop(tmp_path), probs=behavior_probs(0.95),
+                    extra={"behavior_mode": "active", "jev_api_key": "k", "jev_base_url": "http://127.0.0.1:9"})
+    assert "stale_task (CLM p=0.95)" in json.loads(p.stdout)["reason"]
+    rec = next(r for r in clm.wait(len(BEHAVIORS)) if r["meta"]["behavior"] == "stale_task")
+    assert "error" in rec["jev"] and rec["ensemble"]["from"] == "CLM"
+
+
+@pytest.mark.parametrize("jev_review, decision", [(0.8, "ask"), (0.6, None)])
+def test_unsure_risky_tool_calls_go_to_jev(run, fake_jev, jev_review, decision):
+    j = fake_jev({"allow": 1 - jev_review - 0.05, "review": jev_review, "block": 0.05})
+    p, _, clm = run(pre(tid=f"toolu_j{int(jev_review * 10)}"), mode="active", probs=LEANS_REVIEW, extra=jev_cfg(j))
+    assert len(j.systemone) == 1
+    if decision:
+        out = json.loads(p.stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "ask" and "Jev (p=0.80)" in \
+            out["hookSpecificOutput"]["permissionDecisionReason"]
+    else:
+        assert p.stdout == ""
+    rec = next(r for r in clm.wait(1) if r.get("workflow") == "routing/claude-code-tools")
+    assert rec["escalation"]["judge"] == "jev" and rec["acted"] == ("jev" if decision else "baseline")
+
+
+def test_confident_clm_tool_calls_never_ask_jev(run, fake_jev):
+    j = fake_jev()
+    run(pre(tid="toolu_j0"), mode="active", probs={"allow": 0.97, "review": 0.02, "block": 0.01}, extra=jev_cfg(j))
+    assert j.systemone == []
+
+
+def test_shadow_logs_jev_on_the_calls_it_would_decide(run, fake_jev):
+    j = fake_jev({"allow": 0.1, "review": 0.85, "block": 0.05})
+    p, _, clm = run(pre(tid="toolu_js"), probs=LEANS_REVIEW, extra=jev_cfg(j))
+    assert p.stdout == ""
+    rec = next(r for r in clm.wait(1) if r.get("workflow") == "routing/claude-code-tools")
+    assert rec["acted"] == "baseline" and rec["escalation"]["label"] == "review"

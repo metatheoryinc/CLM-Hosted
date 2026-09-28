@@ -99,6 +99,9 @@ def install(args) -> None:
     if not key:
         raise SystemExit("no agent key given")
     new = {"base_url": "https://clm.metatheory.dev", **cfg, "api_key": key}
+    jev_key = args.jev_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY")
+    if jev_key:
+        new["jev_api_key"] = jev_key
     if new.get("mode") == "off":                 # re-installing after uninstall
         new.pop("mode")
     if args.shadow:
@@ -149,7 +152,8 @@ def status(_args) -> None:
     print(f"hooks in {hooks_path()}: {', '.join(events) or 'none'}")
     print(f"hook files in {dest()}: {'present' if os.path.exists(os.path.join(dest(), 'clm_hook.py')) else 'missing'}")
     cfg = read_json(config_path())
-    print(f"config {config_path()}: key {'set' if cfg.get('api_key') else 'MISSING'}")
+    print(f"config {config_path()}: key {'set' if cfg.get('api_key') else 'MISSING'}, "
+          f"Jev key {'set' if cfg.get('jev_api_key') else 'not set'}")
     if os.path.exists(os.path.join(dest(), "clm_hook.py")):
         os.environ["CLM_HOOK_RUNTIME"] = "codex"
         os.execv(sys.executable, [sys.executable, os.path.join(dest(), "clm_hook.py"), "--status"])
@@ -162,6 +166,7 @@ def main(argv: list[str] | None = None) -> None:
     for p in (ap, i):
         p.add_argument("--key", help="agent key (default: $CLM_API_KEY, the existing config, or a prompt)")
         p.add_argument("--shadow", action="store_true", help="behavior checks log only in Codex")
+        p.add_argument("--jev-key", help="optional TypeSafe key (default: $TYPESAFE_API_KEY): CLM + Jev behavior checks")
     u = sub.add_parser("uninstall", help="remove the hooks and the copied hook files")
     u.add_argument("--purge", action="store_true", help="also delete the config file shared with Claude Code")
     sub.add_parser("status", help="show what is installed")

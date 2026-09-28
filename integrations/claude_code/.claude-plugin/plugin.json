@@ -1,6 +1,6 @@
 {
   "name": "clm",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "CLM in Claude Code: cheaper subagent models when CLM is confident, behavior checks when a turn ends, and a shadow classifier for tool calls.",
   "author": {
     "name": "Metatheory"
@@ -38,6 +38,13 @@
       "title": "Tool-call gate",
       "default": false,
       "description": "On: a confident review/block pick forces the permission prompt or denies the call. Off: log only."
+    },
+    "jev_api_key": {
+      "type": "string",
+      "title": "Jev API key (optional)",
+      "sensitive": true,
+      "required": false,
+      "description": "A TypeSafe key. With one, behavior checks act on the average of CLM and Jev, and unsure tool calls go to Jev. Stored in your keychain."
     }
   }
 }

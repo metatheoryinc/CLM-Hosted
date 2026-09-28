@@ -31,14 +31,15 @@ def msg_text(m: dict, n: int) -> str:
     return f"[{head}] {clip(body, n)}"
 
 
-def render(metadata: dict, messages: list[dict], output: dict) -> str:
-    """Metadata, the first two messages, the latest messages and the output, within BUDGET."""
+def render(metadata: dict, messages: list[dict], output: dict, budget: int = BUDGET) -> str:
+    """Metadata, the first two messages, the latest messages and the output, within ``budget``
+    characters (BUDGET for CLM; a model with a longer window, like Jev, can take more)."""
     meta = {k: v for k, v in (metadata or {}).items() if v is not None}
     parts = ["call metadata: " + ", ".join(f"{k}={v}" for k, v in meta.items())]
     msgs = list(messages or [])
     out = msg_text({**(output or {}), "role": "assistant output"}, 1600)
     first = [msg_text(m, 700) for m in msgs[:2] if m.get("content") or m.get("tool_calls")]
-    left = BUDGET - len(parts[0]) - len(out) - sum(map(len, first))
+    left = budget - len(parts[0]) - len(out) - sum(map(len, first))
     tail = []
     for m in reversed(msgs[2:]):
         t = msg_text(m, 900)

@@ -34,6 +34,9 @@ python3 integrations/codex/install.py status
 python3 integrations/codex/install.py uninstall
 ```
 
+`--jev-key` (or `TYPESAFE_API_KEY`) adds Jev, as in the Claude Code plugin's
+[With a Jev key](../claude_code/README.md#with-a-jev-key).
+
 `uninstall` removes only these hooks and `~/.codex/clm/`; `--purge` also deletes the shared config
 (and the key). `--shadow` at install keeps behavior checks log-only.
 
