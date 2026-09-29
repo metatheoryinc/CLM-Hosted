@@ -22,6 +22,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(REPO, "integrations", "claude_code")
+MCP_SRC = os.path.join(REPO, "integrations", "codex", "clm_mcp.py")
+AGENTS_SNIPPET = """Before you call spawn_agent, call the clm_pick_model tool with the task exactly as you will give it
+to the subagent, and pass the model and reasoning_effort it returns to spawn_agent."""
 FILES = ("clm_hook.py", "clm_behaviors.py", "behaviors.json")
 DIRS = ("rubrics",)
 MARK = "clm_hook.py"
@@ -89,6 +92,44 @@ def backup(path: str) -> None:
         shutil.copy2(path, f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
 
 
+def register_mcp(server: str) -> str:
+    """Register the clm_pick_model MCP server with Codex (`codex mcp add`), replacing an older entry."""
+    codex = shutil.which("codex")
+    if not codex or os.environ.get("CLM_INSTALL_SKIP_MCP"):
+        return f"not registered (no codex on PATH); run: codex mcp add clm -- {sys.executable} {server}"
+    import subprocess
+    subprocess.run([codex, "mcp", "remove", "clm"], capture_output=True)
+    p = subprocess.run([codex, "mcp", "add", "clm", "--env", "CLM_HOOK_RUNTIME=codex", "--", "python3", server],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return f"codex mcp add failed: {(p.stderr or p.stdout)[:200]}"
+    approved = allow_without_prompt(os.path.join(codex_home(), "config.toml"))
+    return "registered as MCP server 'clm'" + ("" if approved else " (approve it once when Codex first asks)")
+
+
+def allow_without_prompt(config: str) -> bool:
+    """Let clm_pick_model run without an approval prompt (it reads the task and returns a model name).
+
+    Without this, `codex exec` and any session with approval policy "never" rejects the call.
+    """
+    try:
+        lines = open(config, encoding="utf-8").read().split("\n")
+    except OSError:
+        return False
+    try:
+        i = lines.index("[mcp_servers.clm]")
+    except ValueError:
+        return False
+    end = next((j for j in range(i + 1, len(lines)) if lines[j].startswith("[")), len(lines))
+    if any(l.strip().startswith("default_tools_approval_mode") for l in lines[i + 1:end]):
+        return True
+    backup(config)
+    lines.insert(i + 1, 'default_tools_approval_mode = "approve"')
+    with open(config, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return True
+
+
 def install(args) -> None:
     cfg = read_json(config_path())
     key = args.key or os.environ.get("CLM_API_KEY") or cfg.get("api_key")
@@ -115,6 +156,8 @@ def install(args) -> None:
         shutil.copy2(os.path.join(SRC, f), os.path.join(d, f))
     for sub in DIRS:
         shutil.copytree(os.path.join(SRC, sub), os.path.join(d, sub), dirs_exist_ok=True)
+    shutil.copy2(MCP_SRC, os.path.join(d, "clm_mcp.py"))
+    mcp = register_mcp(os.path.join(d, "clm_mcp.py"))
 
     path = hooks_path()
     doc = read_json(path)
@@ -127,7 +170,9 @@ def install(args) -> None:
     print(f"installed: hook copied to {d}, {len(BLOCKING + LOGGING)} events registered in {path}")
     print(f"config: {config_path()} (behavior checks "
           f"{(new.get('codex') or {}).get('behavior_mode', new.get('behavior_mode', 'active'))}, tool calls shadow)")
+    print(f"clm_pick_model tool: {mcp}")
     print("next time Codex starts it asks you to review and trust the new hooks; they run once you do")
+    print("to have Codex pick subagent models with CLM, add this to AGENTS.md:\n\n" + AGENTS_SNIPPET)
 
 
 def uninstall(args) -> None:
@@ -140,6 +185,9 @@ def uninstall(args) -> None:
     elif os.path.exists(path):
         os.remove(path)
     shutil.rmtree(dest(), ignore_errors=True)
+    if shutil.which("codex") and not os.environ.get("CLM_INSTALL_SKIP_MCP"):
+        import subprocess
+        subprocess.run([shutil.which("codex"), "mcp", "remove", "clm"], capture_output=True)
     if args.purge and os.path.exists(config_path()):
         os.remove(config_path())
     print(f"removed {n} hooks from {path} and {dest()}" + (f"; deleted {config_path()}" if args.purge else ""))

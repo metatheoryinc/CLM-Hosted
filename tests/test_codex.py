@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "integrations", "claude_code"))
 import clm_behaviors as CB  # noqa: E402
@@ -75,7 +77,7 @@ def test_codex_runtime_defaults_and_overrides(tmp_path, monkeypatch):
 
 def run_install(tmp_path, *args, **env):
     e = {k: v for k, v in os.environ.items() if not k.startswith("CLM_")}
-    e.update(CODEX_HOME=str(tmp_path / "codex"), CLM_HOOK_CONFIG=str(tmp_path / "clm.json"), **env)
+    e.update(CODEX_HOME=str(tmp_path / "codex"), CLM_HOOK_CONFIG=str(tmp_path / "clm.json"), CLM_INSTALL_SKIP_MCP="1", **env)
     return subprocess.run([sys.executable, INSTALL, *args], capture_output=True, text=True, env=e,
                           stdin=subprocess.DEVNULL, timeout=30)
 
@@ -92,7 +94,7 @@ def test_install_copies_the_hook_and_keeps_other_hooks(tmp_path):
     assert ours == {"PreToolUse", "Stop", "SubagentStop", "PermissionRequest", "PostToolUse", "SubagentStart"}
     h = next(h for g in doc["hooks"]["PreToolUse"] for h in g["hooks"])
     assert set(h) == {"type", "command"} and "CLM_HOOK_RUNTIME=codex" in h["command"]   # Codex rejects unknown fields
-    for f in ("clm_hook.py", "clm_behaviors.py", "behaviors.json", "rubrics/behaviors.md"):
+    for f in ("clm_hook.py", "clm_behaviors.py", "behaviors.json", "rubrics/behaviors.md", "clm_mcp.py"):
         assert (tmp_path / "codex" / "clm" / f).exists(), f
     assert json.loads((tmp_path / "clm.json").read_text())["api_key"] == "k-1"
     assert oct(os.stat(tmp_path / "clm.json").st_mode & 0o777) == "0o600"
@@ -117,3 +119,92 @@ def test_uninstall_leaves_other_hooks(tmp_path):
 def test_no_key_fails_cleanly(tmp_path):
     p = run_install(tmp_path)
     assert p.returncode != 0 and "no agent key" in p.stderr
+
+
+
+# ── clm_pick_model: the MCP tool Codex calls before spawn_agent ─────────────
+
+from test_claude_code_hook import FakeCLM  # noqa: E402
+
+MCP = os.path.join(ROOT, "integrations", "codex", "clm_mcp.py")
+LONG_TASK = "Investigate why the checkout service drops orders under load and propose a fix. " * 20
+
+
+def mcp_session(tmp_path, clm_url, *msgs):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"mode": "shadow", "base_url": clm_url, "api_key": "k"}))
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLM_", "CLAUDE_PLUGIN"))}
+    env.update(CLM_HOOK_CONFIG=str(cfg), HOME=str(tmp_path))
+    p = subprocess.run([sys.executable, MCP], input="\n".join(json.dumps(m) for m in msgs) + "\n",
+                       capture_output=True, text=True, env=env, timeout=30)
+    return [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+
+
+def call(i, task, name="t"):
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+            "params": {"name": "clm_pick_model", "arguments": {"task": task, "task_name": name}}}
+
+
+def picked(reply):
+    return json.loads(reply["result"]["content"][0]["text"])
+
+
+def test_the_server_speaks_mcp(tmp_path):
+    clm = FakeCLM()
+    try:
+        init, tools = mcp_session(tmp_path, clm.url,
+                                  {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+                                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    finally:
+        clm.srv.shutdown()
+    assert init["result"]["serverInfo"]["name"] == "clm" and "tools" in init["result"]["capabilities"]
+    assert [t["name"] for t in tools["result"]["tools"]] == ["clm_pick_model"]
+
+
+@pytest.mark.parametrize("probs, task, tier, model", [
+    ({"haiku": 0.02, "sonnet": 0.95, "opus": 0.03}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # confident
+    ({"haiku": 0.60, "sonnet": 0.30, "opus": 0.10}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # unsure: one tier up
+    ({"haiku": 0.10, "sonnet": 0.20, "opus": 0.70}, LONG_TASK, "opus", "gpt-6-astra"),         # unsure at the top stays
+    ({"haiku": 0.97, "sonnet": 0.02, "opus": 0.01}, "count the files", "sonnet", "gpt-5.6-terra"),  # too short for haiku
+    ({"haiku": 0.97, "sonnet": 0.02, "opus": 0.01}, LONG_TASK, "haiku", "gpt-5.6-luna"),
+])
+def test_pick(tmp_path, probs, task, tier, model):
+    clm = FakeCLM(probs)
+    try:
+        [r] = mcp_session(tmp_path, clm.url, call(1, task))
+        got = picked(r)
+        assert (got["tier"], got["model"]) == (tier, model) and got["reasoning_effort"] and got["why"]
+        [(_, body)] = clm.systemone
+        assert body["model"] == "subagent-tier-v2"                        # the trained head, not clm-latest
+        rec = clm.wait(1)[0]
+        assert rec["workflow"] == "routing/codex-model-picks" and rec["meta"]["picked"]["model"] == model
+    finally:
+        clm.srv.shutdown()
+
+
+def test_clm_down_means_the_middle_tier(tmp_path):
+    [r] = mcp_session(tmp_path, "http://127.0.0.1:9", call(1, LONG_TASK))
+    assert picked(r)["tier"] == "sonnet" and "unavailable" in picked(r)["why"]
+
+
+def test_a_bad_call_is_an_error_not_a_crash(tmp_path):
+    clm = FakeCLM()
+    try:
+        [r, u] = mcp_session(tmp_path, clm.url, call(1, "  "), {"jsonrpc": "2.0", "id": 2, "method": "nope"})
+    finally:
+        clm.srv.shutdown()
+    assert r["result"]["isError"] is True and u["error"]["code"] == -32601
+
+
+def test_the_pick_tool_is_allowed_without_a_prompt_once(tmp_path):
+    spec2 = importlib.util.spec_from_file_location("codex_install", INSTALL)
+    inst = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(inst)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model = "x"\n\n[mcp_servers.clm]\ncommand = "python3"\n\n[mcp_servers.other]\ncommand = "y"\n')
+    assert inst.allow_without_prompt(str(cfg)) and inst.allow_without_prompt(str(cfg))
+    text = cfg.read_text()
+    assert text.count("default_tools_approval_mode") == 1
+    assert text.index("default_tools_approval_mode") < text.index("[mcp_servers.other]")
+    assert inst.allow_without_prompt(str(tmp_path / "missing.toml")) is False

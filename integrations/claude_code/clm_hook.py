@@ -115,6 +115,8 @@ PLUGIN_DEFAULTS = {"base_url": "https://clm.metatheory.dev", "mode": "shadow",
 # Claude Code's; its subagent task text is encrypted, so subagents are only logged, and the judge is Codex
 CODEX_DEFAULTS = {**{k: v for k, v in PLUGIN_DEFAULTS.items() if not k.startswith("subagent_")},
                   "judge_name": "gpt-5.6-terra",
+                  # clm_pick_model (integrations/codex/clm_mcp.py) asks the trained subagent-tier head
+                  "subagent_model": "subagent-tier-v2", "subagent_calibrate": "none",
                   "judge_cmd": "codex exec --skip-git-repo-check --ephemeral -s read-only -m gpt-5.6-terra "
                                "-c model_reasoning_effort=low -c features.hooks=false -c mcp_servers={} -"}
 PLUGIN_OPTIONS = {"api_key": "api_key", "base_url": "base_url", "jev_api_key": "jev_api_key"}
