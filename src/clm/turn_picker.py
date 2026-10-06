@@ -544,10 +544,11 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
                     why += "; other candidates were excluded by the budget guard"
                 peers = [(c, a) for c, a in eligible if a["group"] == assessment["group"]]
                 if len(peers) > 1:
-                    scores = {a["headroom"] for _, a in peers}
-                    if len(scores) == 1:
+                    selected_score = assessment["headroom"]
+                    if sum(a["headroom"] == selected_score for _, a in peers) > 1:
                         why += "; provider preference and candidate order broke the capacity tie"
-                    else:
+                    if selected_score is not None and any(
+                            a["headroom"] is not None and a["headroom"] < selected_score for _, a in peers):
                         why += "; selected the greater measured budget headroom"
                 elif len(eligible) > 1:
                     why += "; measured capacity ranked ahead of unknown or reset-grace capacity"

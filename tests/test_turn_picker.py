@@ -199,6 +199,14 @@ def test_preference_only_breaks_ties_and_order_breaks_remaining_ties():
                      c, now=lambda: NOW)["provider"] == "codex"
 
 
+def test_reason_explains_both_headroom_ranking_and_a_tie_at_the_winning_score():
+    c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
+    menu = [candidate("codex", used=40, model="codex-a"), candidate("claude", used=40),
+            candidate("codex", used=50, model="codex-b")]
+    got = pick_turn(request(*menu, prefer="claude"), c, now=lambda: NOW)
+    assert got["provider"] == "claude" and "greater measured" in got["why"] and "tie" in got["why"]
+
+
 def test_exactly_one_automatic_tier_drop_and_never_an_upgrade():
     c = classifier(result("opus", 0.9, {"haiku": 0.05, "sonnet": 0.05, "opus": 0.9}))
     got = pick_turn(request(candidate("codex", "opus", 95), candidate("claude", "sonnet", 20),
