@@ -293,14 +293,31 @@ def test_classifiers_share_one_deadline_and_late_results_are_abandoned():
 def test_audit_contains_replay_data_is_redacted_and_sink_failure_does_not_change_pick():
     records = []
     c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
-    req = request(candidate("codex", used=12), task="password=hunter2hunter2 " + LONG_TASK)
+    req = request(candidate("codex", used=12), candidate("claude", "opus", 30),
+                  task="password=hunter2hunter2 " + LONG_TASK)
     got = pick_turn(req, c, now=lambda: NOW, sink=records.append)
     rec = records[0]
     assert rec["workflow"] == "routing/turn-picks" and rec["meta"]["policy_version"] == "turn-picks-v1"
     assert rec["meta"]["candidates"][0]["budget"]["windows"][0]["used_percent"] == 12
+    assert len(rec["meta"]["assessments"]) == len(req["candidates"])
     assert "hunter2" not in repr(rec) and rec["worker"] == got["tier"]
     got2 = pick_turn(req, c, now=lambda: NOW, sink=lambda _record: (_ for _ in ()).throw(RuntimeError("secret")))
     assert got2 == got
+
+
+def test_audit_sanitizes_candidate_and_classifier_metadata():
+    records = []
+    answer = result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05})
+    answer["model"] = "api_key=hunter2hunter2"
+    answer["calibrate"] = "token=abcdefghijklmnop"
+    cand = candidate("codex", windows=[{"name": "token=abcdefghijklmnop", "used_percent": 10,
+                                            "window_minutes": 300, "resets_at": NOW + 1000}],
+                     model="api_key=hunter2hunter2")
+    req = request(cand)
+    req["caller"] = "token=abcdefghijklmnop"
+    got = pick_turn(req, classifier(answer), now=lambda: NOW, sink=records.append)
+    assert got["model"] == "api_key=hunter2hunter2"  # executable identity remains exact for the caller
+    assert "hunter2" not in repr(records[0]) and "abcdefghijklmnop" not in repr(records[0])
 
 
 def test_bounded_audit_queue_never_blocks_and_flush_is_bounded():

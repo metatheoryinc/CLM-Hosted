@@ -8,6 +8,8 @@
                                                        -> {"model", "calibrate", "answers": {id: Answer}, "usage"}
     POST /v1/rank        {"context": ..., "question": ..., "answers": [...]}
                                                        -> {"model", "ranked": [{rank, candidate, prob}]}
+    POST /v1/pick-turn   {"task", "caller", "candidates", ...}
+                                                       -> supplied provider/model/effort/tier selection
     POST /v1/verify      {"trajectories": [{"id", "steps": [{"state", "action"}]}], "model": "deepswe",
                           "window": 12}                -> {"model", "best", "trajectories": [{id, score, ...}]}
     POST /v1/encoder     {"texts": [..]}               -> {"dim", "dtype", "embeddings": [base64 float32], "usage"}
@@ -25,8 +27,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import json
 import os
 import time
+import urllib.request
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -35,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from .embedder import EmbedderError
 from .engine import DEFAULT_MODEL, VERIFY_MODEL, Engine, ModelNotFound
 from .heads import DEFAULT_CKPT_DIR, HF_FILE, default_device, download
+from . import turn_picker
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -71,7 +77,66 @@ MAX_HEAD_BYTES = 256 << 20
 HEAD_NAME = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
-def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False) -> FastAPI:
+_TURN_PICK_ENV = {
+    "CLM_TURN_PICK_THRESHOLD": ("turn_pick_threshold", float),
+    "CLM_TURN_PICK_TOP_THRESHOLD": ("turn_pick_top_threshold", float),
+    "CLM_TURN_PICK_MIN_TASK_CHARS": ("turn_pick_min_task_chars", int),
+    "CLM_TURN_PICK_BUDGET_CEILING_PERCENT": ("turn_pick_budget_ceiling_percent", float),
+    "CLM_TURN_PICK_BUDGET_RESERVE_PERCENT": ("turn_pick_budget_reserve_percent", float),
+    "CLM_TURN_PICK_RESET_GRACE_MINUTES": ("turn_pick_reset_grace_minutes", float),
+    "CLM_TURN_PICK_BUDGET_MAX_AGE_SECONDS": ("turn_pick_budget_max_age_seconds", float),
+    "CLM_TURN_PICK_TIMEOUT_SECONDS": ("turn_pick_timeout_seconds", float),
+}
+
+
+def turn_pick_config_from_env(environ=None) -> dict:
+    """Read only service-owned turn-picker settings; never reads user files."""
+    env = os.environ if environ is None else environ
+    out = {}
+    for name, (key, convert) in _TURN_PICK_ENV.items():
+        if name in env:
+            try:
+                out[key] = convert(env[name])
+            except (TypeError, ValueError):
+                out[key] = env[name]  # shared policy safely defaults on invalid configuration
+    if "CLM_TURN_PICK_JEV_ENABLED" in env:
+        raw = str(env["CLM_TURN_PICK_JEV_ENABLED"]).strip().lower()
+        out["turn_pick_jev_enabled"] = raw in ("1", "true", "yes", "on") if raw in (
+            "0", "1", "false", "true", "no", "yes", "off", "on") else raw
+    out["turn_pick_model"] = env.get("CLM_TURN_PICK_MODEL", "subagent-tier-v2")
+    out["turn_pick_calibrate"] = env.get("CLM_TURN_PICK_CALIBRATE", "none")
+    if env.get("CLM_TURN_PICK_JEV_API_KEY"):
+        out["turn_pick_jev_api_key"] = env["CLM_TURN_PICK_JEV_API_KEY"]
+    out["turn_pick_jev_base_url"] = env.get("CLM_TURN_PICK_JEV_BASE_URL", "https://api.typesafe.ai")
+    out["turn_pick_jev_model"] = env.get("CLM_TURN_PICK_JEV_MODEL", "jev-latest")
+    return out
+
+
+def _remote_jev_classifier(settings):
+    key = settings.get("turn_pick_jev_api_key")
+    if not key:
+        return None
+
+    def classify(state, timeout):
+        body = {"state": state, "model": settings["turn_pick_jev_model"], "questions": turn_picker.question()}
+        req = urllib.request.Request(settings["turn_pick_jev_base_url"].rstrip("/") + "/v1/systemone",
+                                     data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "clm-serve/1",
+                                              "Authorization": "Bearer " + key})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.load(response)
+        answer = payload["answers"][turn_picker.QID]
+        probabilities = answer["probabilities"]
+        return {"model": payload.get("model"), "calibrate": payload.get("calibrate", "none"),
+                "choice": answer["choice"], "probability": probabilities[answer["choice"]],
+                "confidence": answer.get("confidence"), "probabilities": probabilities}
+
+    return classify
+
+
+def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False,
+               turn_pick_config: dict | None = None, turn_pick_sink=None, turn_pick_clock=None,
+               turn_pick_jev_classifier=None) -> FastAPI:
     """The API, plus the playground at ``/`` unless ``ui=False``.
 
     ``cors=True`` allows browser requests from any origin (and exposes the
@@ -79,8 +144,23 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
     is off by default: an API key travels in a header the browser would then
     be free to send from any page.
     """
-    app = FastAPI(title="CLM System One API", version="0.1.0")
+    turn_settings = turn_pick_config_from_env()
+    turn_settings.update(turn_pick_config or {})
+    turn_audit = turn_picker.AuditQueue(turn_pick_sink, maxsize=64) if turn_pick_sink is not None else None
+    clock = turn_pick_clock or time.time
+    jev_classifier = turn_pick_jev_classifier
+    if jev_classifier is None and turn_settings.get("turn_pick_jev_enabled"):
+        jev_classifier = _remote_jev_classifier(turn_settings)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        yield
+        if turn_audit is not None:
+            turn_audit.close(timeout=0.25)
+
+    app = FastAPI(title="CLM System One API", version="0.1.0", lifespan=lifespan)
     app.state.engine = engine
+    app.state.turn_pick_audit = turn_audit
     if cors:
         from fastapi.middleware.cors import CORSMiddleware
         app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET", "POST", "OPTIONS"],
@@ -129,6 +209,35 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
         except EmbedderError as e:
             raise HTTPException(502, str(e)) from e
         return JSONResponse(out, headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - t0) * 1000:.1f}"})
+
+    @app.post("/v1/pick-turn")
+    async def pick_turn(request: Request, authorization: str | None = Header(default=None)):
+        """Select one supplied turn configuration with the local tier head and shared policy."""
+        auth(authorization)
+        try:
+            body = await request.json()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(422, f"body is not JSON: {e}") from e
+
+        def classify(state, _timeout):
+            model = turn_settings.get("turn_pick_model", "subagent-tier-v2")
+            calibrate = turn_settings.get("turn_pick_calibrate", "none")
+            out = engine.answer(state, turn_picker.question(), model, 1.0, calibrate)
+            answer = out["answers"][turn_picker.QID]
+            probabilities = answer["probabilities"]
+            return {"model": out.get("model", model), "calibrate": out.get("calibrate", calibrate),
+                    "choice": answer["choice"], "probability": probabilities[answer["choice"]],
+                    "confidence": answer.get("confidence"), "probabilities": probabilities}
+
+        started = time.perf_counter()
+        try:
+            selected = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: turn_picker.pick_turn(body, classify, config=turn_settings, now=clock,
+                                                    jev_classifier=jev_classifier,
+                                                    sink=turn_audit.submit if turn_audit else None))
+        except ValueError as e:
+            raise HTTPException(422, f"invalid request: {e}") from e
+        return JSONResponse(selected, headers={"X-CLM-Latency-Ms": f"{(time.perf_counter() - started) * 1000:.1f}"})
 
     @app.post("/v1/rank")
     async def rank(request: Request, authorization: str | None = Header(default=None)):

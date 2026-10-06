@@ -270,10 +270,16 @@ def _validate_classification(raw):
         raise ValueError("classification probability does not match the chosen probability")
     # Only retain the documented, non-exception fields in an audit record.
     out = {"choice": choice, "probability": probability, "probabilities": clean}
-    for key in ("model", "calibrate", "confidence", "latency_ms"):
+    for key in ("model", "calibrate"):
         value = raw.get(key)
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            out[key] = value
+        if isinstance(value, str):
+            out[key] = redact(value)[:200]
+        elif value is None:
+            out[key] = None
+    for key in ("confidence", "latency_ms"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)):
+            out[key] = float(value)
     return out
 
 
@@ -382,6 +388,17 @@ def _identity(candidate):
     return {key: candidate[key] for key in ("provider", "model", "effort", "tier")}
 
 
+def _audit_identity(candidate):
+    return {"provider": candidate["provider"], "model": redact(candidate["model"])[:500],
+            "effort": redact(candidate["effort"])[:500], "tier": candidate["tier"]}
+
+
+def _audit_budget(budget):
+    return {"observed_at": budget["observed_at"], "windows": [
+        {**window, "name": redact(window["name"])[:500] if window["name"] is not None else None}
+        for window in budget["windows"]]}
+
+
 def _iso(timestamp):
     return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).isoformat(timespec="milliseconds")
 
@@ -390,19 +407,20 @@ def _audit(validated, cfg, state, clm, jev, capability_tier, selected, why, fall
            evaluated_at, assessments, acted):
     candidates = []
     for candidate in validated["candidates"]:
-        candidates.append({key: candidate[key] for key in ("provider", "model", "effort", "tier", "budget", "order")})
+        candidates.append({**_audit_identity(candidate), "budget": _audit_budget(candidate["budget"]),
+                           "order": candidate["order"]})
     safe_assessments = []
     for candidate, assessment in assessments:
-        safe_assessments.append({"candidate": _identity(candidate), **assessment})
+        safe_assessments.append({"candidate": _audit_identity(candidate), **assessment})
     meta = {
         "policy_version": POLICY_VERSION,
-        "caller": validated["caller"],
+        "caller": redact(validated["caller"])[:500],
         "candidates": candidates,
-        "default": _identity(validated["candidates"][0]),
+        "default": _audit_identity(validated["candidates"][0]),
         "prefer": validated["prefer"],
         "requested_tier": validated["requested_tier"],
         "capability_tier": capability_tier,
-        "selected": _identity(selected),
+        "selected": _audit_identity(selected),
         "why": why,
         "fallback": fallback,
         "evaluated_at": evaluated_at,
@@ -492,6 +510,9 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
                     why += "; other candidates were excluded by the budget guard"
                 elif len([a for _, a in considered if a["eligible"]]) > 1:
                     why += "; selected the greater measured budget headroom, with preference and order breaking ties"
+    if cfg is not None:
+        assessments = [(candidate, _evaluate(candidate, cfg, evaluated_at))
+                       for candidate in validated["candidates"]]
     response = {**_identity(selected), "why": why, "fallback": fallback}
     if probabilities is not None:
         response["probabilities"] = probabilities
