@@ -1,7 +1,7 @@
 # Turn model selection contract
 
-Status: proposed v1, 2026-10-06. This document covers steps 1–2 of the
-mipmap auto-picker request. Review this contract before implementation.
+Status: approved v1, 2026-10-06. This document defines the agreed
+mipmap auto-picker request and its shared CLM policy.
 CLM owns both the capability decision and the budget policy; clients only
 collect limits, supply available candidates, execute the result, and record it.
 
