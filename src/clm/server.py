@@ -17,8 +17,8 @@
     GET  /v1/admin/heads · DELETE /v1/admin/heads/{name}
     GET  /v1/models      -> {"models": [{"name", "description", "release_date"}]}
     GET  /health         -> {"ok": true, ...}
-    GET  /               -> the playground: a zero-dependency web UI for the endpoint
-                            above (``--no-ui`` to leave it off)
+    GET  /               -> the developer home (``--no-ui`` to leave static pages off)
+    GET  /playground     -> a zero-dependency web UI for the endpoint above
 
 Question / Answer objects follow the TypeSafe wire schema (noul / choice /
 score), so a request written for TypeSafe replays here unchanged.
@@ -45,12 +45,9 @@ from . import turn_picker
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
-_UI_FILES = ("index.html", "app.css", "app.js")
-
-
-def _asset_stamp() -> str:
-    """Newest mtime across the UI files, as a short hex tag for their URLs."""
-    return format(int(max(os.path.getmtime(os.path.join(STATIC_DIR, f)) for f in _UI_FILES)), "x")
+def _asset_stamp(*filenames: str) -> str:
+    """Newest mtime across ``filenames``, as a short tag for asset URLs."""
+    return format(int(max(os.path.getmtime(os.path.join(STATIC_DIR, f)) for f in filenames)), "x")
 
 
 def _index_html() -> str:
@@ -58,8 +55,18 @@ def _index_html() -> str:
     older app.css/app.js cannot render the new page with the old styling."""
     with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as fh:
         html = fh.read()
-    v = _asset_stamp()
-    return html.replace('href="app.css"', f'href="app.css?v={v}"').replace('src="app.js"', f'src="app.js?v={v}"')
+    v = _asset_stamp("index.html", "app.css", "app.js")
+    return html.replace('href="app.css"', f'href="/app.css?v={v}"').replace(
+        'src="app.js"', f'src="/app.js?v={v}"')
+
+
+def _site_html(filename: str) -> str:
+    """Load a site page and attach the shared asset version."""
+    with open(os.path.join(STATIC_DIR, filename), encoding="utf-8") as fh:
+        html = fh.read()
+    v = _asset_stamp(filename, "home.css", "home.js")
+    return html.replace('href="/home.css"', f'href="/home.css?v={v}"').replace(
+        'src="/home.js"', f'src="/home.js?v={v}"')
 
 
 class _RevalidatingStatic(StaticFiles):
@@ -159,7 +166,7 @@ def _remote_jev_classifier(settings):
 def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False,
                turn_pick_config: dict | None = None, turn_pick_sink=None, turn_pick_clock=None,
                turn_pick_jev_classifier=None, turn_pick_environ=None, turn_pick_audit_opener=None) -> FastAPI:
-    """The API, plus the playground at ``/`` unless ``ui=False``.
+    """The API, plus the developer home and playground unless ``ui=False``.
 
     ``cors=True`` allows browser requests from any origin (and exposes the
     latency header), which a playground served from somewhere else needs.  It
@@ -400,10 +407,26 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
 
     # mounted last: the routes above shadow it, everything else is the static UI
     if ui and os.path.isdir(STATIC_DIR):
-        @app.get("/", include_in_schema=False)
-        @app.get("/index.html", include_in_schema=False)
+        @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+        @app.api_route("/index.html", methods=["GET", "HEAD"], include_in_schema=False)
+        def home():
+            return HTMLResponse(_site_html("home.html"), headers={"Cache-Control": "no-cache"})
+
+        @app.api_route("/playground", methods=["GET", "HEAD"], include_in_schema=False)
+        @app.api_route("/playground/", methods=["GET", "HEAD"], include_in_schema=False)
         def playground():
             return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
+
+        def add_guide(slug: str) -> None:
+            def guide():
+                return HTMLResponse(_site_html(f"guide-{slug}.html"), headers={"Cache-Control": "no-cache"})
+
+            for suffix in ("", "/"):
+                app.add_api_route(f"/guides/{slug}{suffix}", guide, methods=["GET", "HEAD"],
+                                  include_in_schema=False, name=f"guide-{slug}{'-slash' if suffix else ''}")
+
+        for guide_slug in ("claude-code", "codex", "mipmap"):
+            add_guide(guide_slug)
 
         app.mount("/", _RevalidatingStatic(directory=STATIC_DIR, html=True), name="playground")
 
@@ -465,7 +488,7 @@ def main() -> None:
     print(f"[clm] POST http://{args.host}:{args.port}/v1/systemone", flush=True)
     if not args.no_ui:
         host = "localhost" if args.host in ("0.0.0.0", "::") else args.host
-        print(f"[clm] playground http://{host}:{args.port}/", flush=True)
+        print(f"[clm] developer home http://{host}:{args.port}/ · playground /playground", flush=True)
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

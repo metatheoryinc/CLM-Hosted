@@ -109,7 +109,8 @@ engine.answer(state, questions)      # the same dict the HTTP endpoint returns, 
 
 ## Playground
 
-`clm-serve` also serves a web UI at `/` (`http://localhost:8700/` by default).
+`clm-serve` serves its developer home at `/` and the web playground at
+`/playground` (`http://localhost:8700/playground` by default).
 Write a state, add typed questions, and see CLM's answer distributions; every
 request is also shown as JSON, `curl` and Python. A **Rank** tab ranks any
 candidate set, and links are shareable.

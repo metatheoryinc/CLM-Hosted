@@ -42,6 +42,19 @@ config:
     type: string
     secret: true
     # upstream key between the gateway and the Pod; agents never see it
+  anthropicApiKey:
+    type: string
+    secret: true
+    default: ""
+    # optional: enables /v1/anthropic/* (Mipmap's summarizer); leave empty with AI Gateway BYOK
+  aiGatewayUrl:
+    type: string
+    default: ""
+    # optional: https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic
+  aiGatewayToken:
+    type: string
+    secret: true
+    default: ""
   cloudflareAccountId:
     type: string
   cloudflareZoneId:
@@ -174,6 +187,15 @@ resources:
         - name: UPSTREAM_KEY
           type: secret_text
           text: ${clmApiKey}
+        - name: ANTHROPIC_API_KEY
+          type: secret_text
+          text: ${anthropicApiKey}
+        - name: AI_GATEWAY_URL
+          type: plain_text
+          text: ${aiGatewayUrl}
+        - name: AI_GATEWAY_TOKEN
+          type: secret_text
+          text: ${aiGatewayToken}
         - name: DECISIONS
           type: d1
           id: ${decisions.uuid}

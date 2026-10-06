@@ -291,6 +291,28 @@ async function getDecisions(url, env, agent) {
                        { headers: { "Cache-Control": "no-store" } });
 }
 
+// Anthropic Messages API pass-through for agents (Mipmap's summarizer): any request is
+// forwarded as-is, the provider key stays a Worker secret. With AI_GATEWAY_URL set
+// (https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic) it goes through
+// Cloudflare AI Gateway for logs and analytics, authenticated with AI_GATEWAY_TOKEN
+// (cf-aig-authorization) and the key stored there (BYOK) unless ANTHROPIC_API_KEY is set.
+async function anthropicProxy(request, env, url, agent) {
+  const base = env.AI_GATEWAY_URL || "https://api.anthropic.com";
+  if (!env.ANTHROPIC_API_KEY && !(env.AI_GATEWAY_URL && env.AI_GATEWAY_TOKEN)) {
+    return error(404, "anthropic proxy is not configured");
+  }
+  const headers = new Headers(request.headers);
+  headers.delete("Authorization");
+  headers.delete("x-api-key");
+  if (env.ANTHROPIC_API_KEY) headers.set("x-api-key", env.ANTHROPIC_API_KEY);
+  if (env.AI_GATEWAY_URL && env.AI_GATEWAY_TOKEN) headers.set("cf-aig-authorization", `Bearer ${env.AI_GATEWAY_TOKEN}`);
+  if (!headers.has("anthropic-version")) headers.set("anthropic-version", "2023-06-01");
+  const target = `${base.replace(/\/$/, "")}/${url.pathname.slice("/v1/anthropic/".length)}${url.search}`;
+  const response = await fetch(new Request(target, { method: request.method, headers, body: request.body, duplex: "half" }));
+  console.log(JSON.stringify({ agent, path: url.pathname, status: response.status, upstream: "anthropic" }));
+  return response;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -298,6 +320,20 @@ export default {
     // the key pages (signed in through Cloudflare Access) and the device login, before key auth
     if (url.pathname === "/login" || url.pathname.startsWith("/login/")) return loginRoutes(request, env, url);
     if (url.pathname.startsWith("/v1/auth/")) return deviceRoutes(request, env, url);
+
+    const publicPaths = new Set([
+      "/", "/index.html", "/playground", "/playground/",
+      "/home.css", "/home.js", "/app.css", "/app.js",
+      "/guides/claude-code", "/guides/claude-code/", "/guides/codex", "/guides/codex/",
+      "/guides/mipmap", "/guides/mipmap/",
+    ]);
+    if (publicPaths.has(url.pathname) && (request.method === "GET" || request.method === "HEAD")) {
+      const headers = new Headers();
+      for (const name of ["Accept", "Accept-Language", "If-Modified-Since", "If-None-Match"]) {
+        const value = request.headers.get(name); if (value) headers.set(name, value);
+      }
+      return fetch(new Request(url, { method: request.method, headers }));
+    }
 
     // unauthenticated liveness for uptime checks: only whether the Pod and its encoder
     // are up, not the models or cache details clm-serve's /health reports
@@ -327,6 +363,8 @@ export default {
       if (request.method === "GET") return getDecisions(url, env, agent);
       return error(405, "use POST or GET");
     }
+
+    if (url.pathname.startsWith("/v1/anthropic/")) return anthropicProxy(request, env, url, agent);
 
     const headers = new Headers(request.headers);
     headers.set("Authorization", `Bearer ${env.UPSTREAM_KEY}`);

@@ -33,6 +33,29 @@ assert.equal(seen[0].headers.get("Authorization"), "Bearer UP");
 assert.equal(seen[0].headers.get("X-CLM-Agent"), "beta");
 assert.equal(await seen[0].text(), "{}");
 
+// ── anthropic pass-through ─────────────────────────────────────────────
+assert.equal((await worker.fetch(req("/v1/anthropic/v1/messages", "Bearer key-a"), env)).status, 404, "off until configured");
+{
+  const aenv = { ...env, ANTHROPIC_API_KEY: "sk-ant-real" };
+  const n = seen.length;
+  assert.equal((await worker.fetch(req("/v1/anthropic/v1/messages", "Bearer nope"), aenv)).status, 401);
+  assert.equal(seen.length, n, "unauthenticated never reaches Anthropic");
+  const pr = new Request("https://clm.example.com/v1/anthropic/v1/messages?beta=true", { method: "POST",
+    headers: { Authorization: "Bearer key-a", "anthropic-beta": "x" }, body: "{}" });
+  assert.equal((await worker.fetch(pr, aenv)).status, 200);
+  const up = seen.at(-1);
+  assert.equal(up.url, "https://api.anthropic.com/v1/messages?beta=true");
+  assert.equal(up.headers.get("x-api-key"), "sk-ant-real");
+  assert.equal(up.headers.get("Authorization"), null, "agent key is not forwarded");
+  assert.equal(up.headers.get("anthropic-beta"), "x");
+  const genv = { ...env, AI_GATEWAY_URL: "https://gateway.ai.cloudflare.com/v1/a/g/anthropic", AI_GATEWAY_TOKEN: "T" };
+  await worker.fetch(req("/v1/anthropic/v1/messages", "Bearer key-a"), genv);
+  const gw = seen.at(-1);
+  assert.equal(gw.url, "https://gateway.ai.cloudflare.com/v1/a/g/anthropic/v1/messages");
+  assert.equal(gw.headers.get("cf-aig-authorization"), "Bearer T");
+  assert.equal(gw.headers.get("x-api-key"), null, "BYOK: key lives in AI Gateway");
+}
+
 allow = false;
 assert.equal((await worker.fetch(req("/v1/systemone", "Bearer key-a"), env)).status, 429);
 allow = true;
@@ -48,6 +71,54 @@ health = "down";
 r = await worker.fetch(req("/health", null, "GET"), env);
 assert.equal(r.status, 503); assert.deepEqual(await r.json(), { ok: false });
 assert.equal((await worker.fetch(req("/health", null, "POST"), env)).status, 401, "only GET /health is open");
+
+// ── public developer pages: exact GET/HEAD allowlist, stripped headers ─────
+const HOST = "https://clm.example.com";
+const publicPaths = [
+  "/", "/index.html", "/playground", "/playground/", "/home.css", "/home.js", "/app.css", "/app.js",
+  "/guides/claude-code", "/guides/claude-code/", "/guides/codex", "/guides/codex/", "/guides/mipmap", "/guides/mipmap/",
+];
+for (const path of publicPaths) {
+  for (const method of ["GET", "HEAD"]) {
+    assert.equal((await worker.fetch(new Request(HOST + path, { method }), env)).status, 200, `${method} ${path} is anonymous`);
+    assert.equal((await worker.fetch(new Request(HOST + path, { method, headers: { Authorization: "Bearer invalid" } }), env)).status, 200,
+      `${method} ${path} ignores invalid credentials`);
+    const beforePublic = seen.length;
+    const request = new Request(HOST + path, { method, headers: {
+      Authorization: "Bearer key-a", Cookie: "session=private; CF_Authorization=secret",
+      "Cf-Access-Jwt-Assertion": "access-token", "X-CLM-Agent": "spoofed",
+      Accept: "text/html", "Accept-Language": "en-US", "User-Agent": "browser-test",
+    } });
+    assert.equal((await worker.fetch(request, env)).status, 200, `${method} ${path} is public`);
+    assert.equal(seen.length, beforePublic + 1, `${method} ${path} reaches the origin`);
+    const forwarded = seen.at(-1);
+    assert.equal(forwarded.headers.get("Authorization"), null, `${path} strips authorization`);
+    assert.equal(forwarded.headers.get("Cookie"), null, `${path} strips cookies`);
+    assert.equal(forwarded.headers.get("Cf-Access-Jwt-Assertion"), null, `${path} strips Access JWTs`);
+    assert.equal(forwarded.headers.get("X-CLM-Agent"), null, `${path} strips agent identity`);
+    assert.equal(forwarded.headers.get("User-Agent"), null, `${path} uses a small safe header allowlist`);
+    assert.equal(forwarded.headers.get("Accept"), "text/html");
+    assert.equal(forwarded.headers.get("Accept-Language"), "en-US");
+  }
+}
+
+allow = false;
+assert.equal((await worker.fetch(new Request(HOST + "/home.css"), env)).status, 200, "public assets do not consume agent quota");
+allow = true;
+
+for (const path of ["/guides", "/guides/nope", "/guides/claude-code/extra", "/home.css/extra", "/robots.txt",
+  "/home.html", "/guide-claude-code.html", "/guide-codex.html", "/guide-mipmap.html",
+  "/v1/models", "/v1/admin/heads", "/docs"]) {
+  const beforeProtected = seen.length;
+  assert.equal((await worker.fetch(new Request(HOST + path), env)).status, 401, `GET ${path} stays protected`);
+  assert.equal(seen.length, beforeProtected, `${path} never reaches origin anonymously`);
+}
+for (const path of publicPaths) {
+  const beforeMutation = seen.length;
+  assert.equal((await worker.fetch(new Request(HOST + path, { method: "POST", body: "{}" }), env)).status, 401,
+    `POST ${path} stays protected`);
+  assert.equal(seen.length, beforeMutation, `POST ${path} never reaches origin anonymously`);
+}
 
 // ── /v1/decisions, against a D1 stand-in backed by real SQLite ─────────────
 const { DatabaseSync } = await import("node:sqlite");
