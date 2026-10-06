@@ -13,3 +13,10 @@ config:
   clm-hosted:imageTag: 1c5f53a988c66ada9d0c568bfdee6b219727394f
   clm-hosted:adminAgents:
     - admin
+    - jt@metatheory.gg
+  clm-hosted:accessTeamDomain: metatheory.cloudflareaccess.com
+  clm-hosted:googleClientId: 374857321431-foqij8lbrqfo02i6vg76c52ksnpko26o.apps.googleusercontent.com
+  clm-hosted:googleClientSecret:
+    secure: AAABAGVApCxrt7NcAuz2WvvEAJdL+PMUuxP9d+M9uvhFZAqNZfNjzPWz1TLYCvq4crwNQt5x71fDD35GvRkCI6+Rpg==
+  clm-hosted:decisionReaders:
+    - jt@metatheory.gg
