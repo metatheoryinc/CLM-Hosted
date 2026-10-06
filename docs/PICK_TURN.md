@@ -12,7 +12,7 @@ collect limits, supply available candidates, execute the result, and record it.
 - Python function `pick_turn(cfg, request, *, now=None)` backed by a shared,
   standard-library-only policy module. Classifier, clock, and decision sink
   must be replaceable in tests. Support Python 3.9 for the installed MCP path.
-- Proposed HTTP `POST /v1/pick-turn` in `src/clm/server.py`, using the same
+- HTTP `POST /v1/pick-turn` in `src/clm/server.py`, using the same
   validator and policy with the local engine as classifier. This fits the
   existing authenticated API and gateway forwarding. It should not call its
   own `/v1/systemone` over HTTP or import the installed hook at server boot.
@@ -86,7 +86,7 @@ must validate it before making a request. These names come from the agreed
 mapping; the picker does not assert that every account has access to them.
 
 **The first candidate is the caller's effective default.** For auto mode,
-proposed `MIPMAP_AUTO_DEFAULT` is a full JSON candidate tuple, including
+`MIPMAP_AUTO_DEFAULT` is a full JSON candidate tuple, including
 `tier`; its default is Codex `gpt-5.6-terra` / `medium` / `sonnet`. It may
 identify an existing menu entry or add an explicit new one. Do not infer
 tier from an arbitrary model name. Existing fixed-provider configuration
