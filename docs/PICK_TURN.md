@@ -290,6 +290,15 @@ was trained on model IDs. Record:
   per-candidate exclusions/scores, and whether reset grace or unknown budget
   handling determined the result. This makes decisions replayable.
 
+The installed MCP adapter uses its existing CLM collector configuration.
+For the HTTP service, set both `CLM_TURN_PICK_AUDIT_URL` to the collector's
+exact `/v1/decisions` URL and `CLM_TURN_PICK_AUDIT_KEY` through service secret
+configuration. Uploads have a 0.25-second timeout and run through the bounded
+daemon queue. Neither variable is read from user files; a partial pair fails
+service startup. A library/service embedding can instead inject a sink.
+Enable this collector configuration when deploying the HTTP route; absent
+configuration leaves auditing disabled for that route.
+
 No keys, tokens, raw provider payloads, or unfiltered exceptions enter
 records. Learned-model labels, when added later, use `source: "llm:<name>"`.
 Audit budgets are explicitly authorized for the shared collector; local
