@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "turn_pick_timeout_seconds": 1.5,
     "turn_pick_jev_enabled": False,
 }
+MAX_INFLIGHT_CLASSIFICATIONS = 4
+_CLASSIFICATION_SLOTS = threading.BoundedSemaphore(MAX_INFLIGHT_CLASSIFICATIONS)
 
 SECRET_PATTERNS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
@@ -88,20 +90,22 @@ class AuditQueue:
         self._sink = sink
         self._queue = queue.Queue(maxsize=max(1, int(maxsize)))
         self._closed = False
+        self._state_lock = threading.Lock()
         self.dropped = 0
         self._thread = threading.Thread(target=self._run, name="clm-turn-pick-audit", daemon=True)
         self._thread.start()
 
     def submit(self, record):
-        if self._closed:
-            self.dropped += 1
-            return False
-        try:
-            self._queue.put_nowait(record)
-            return True
-        except queue.Full:
-            self.dropped += 1
-            return False
+        with self._state_lock:
+            if self._closed:
+                self.dropped += 1
+                return False
+            try:
+                self._queue.put_nowait(record)
+                return True
+            except queue.Full:
+                self.dropped += 1
+                return False
 
     def _run(self):
         while True:
@@ -115,15 +119,18 @@ class AuditQueue:
                 pass
             finally:
                 self._queue.task_done()
-            if self._closed and self._queue.empty():
+            with self._state_lock:
+                finished = self._closed and self._queue.empty()
+            if finished:
                 return
 
     def close(self, timeout=0.2):
-        self._closed = True
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            pass
+        with self._state_lock:
+            self._closed = True
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
         self._thread.join(max(0.0, float(timeout)))
 
 
@@ -142,7 +149,8 @@ def _callback_audit():
 def _dispatch_audit(sink, record):
     """Enqueue arbitrary callbacks; avoid a second queue for our own queue submit method."""
     owner = getattr(sink, "__self__", None)
-    if isinstance(owner, AuditQueue) and getattr(sink, "__func__", None) is AuditQueue.submit:
+    if (isinstance(owner, AuditQueue) and getattr(sink, "__func__", None) is AuditQueue.submit) or \
+            getattr(sink, "_clm_async_sink", False):
         sink(record)
     else:
         _callback_audit().submit((sink, record))
@@ -336,26 +344,42 @@ def _classify(classifier, jev_classifier, state, cfg):
 
     def run(name, function):
         try:
-            value = function(state, max(0.001, deadline - time.monotonic()))
-        except Exception:
-            value = {"error": "classification failed"}
-        try:
-            results.put_nowait((name, value))
-        except queue.Full:
-            pass
+            try:
+                value = function(state, max(0.001, deadline - time.monotonic()))
+            except Exception:
+                value = {"error": "classification failed"}
+            try:
+                results.put_nowait((name, value, time.monotonic()))
+            except queue.Full:
+                pass
+        finally:
+            _CLASSIFICATION_SLOTS.release()
 
+    admitted = 0
     for name, function in jobs:
-        threading.Thread(target=run, args=(name, function), name="clm-turn-pick-%s" % name, daemon=True).start()
-    found = {}
-    while len(found) < len(jobs):
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
+        if remaining <= 0 or not _CLASSIFICATION_SLOTS.acquire(timeout=remaining):
+            continue
         try:
-            name, value = results.get(timeout=remaining)
+            threading.Thread(target=run, args=(name, function), name="clm-turn-pick-%s" % name,
+                             daemon=True).start()
+            admitted += 1
+        except Exception:
+            _CLASSIFICATION_SLOTS.release()
+    found = {}
+    received = 0
+    while received < admitted:
+        remaining = deadline - time.monotonic()
+        try:
+            if remaining > 0:
+                name, value, completed_at = results.get(timeout=remaining)
+            else:
+                name, value, completed_at = results.get_nowait()
         except queue.Empty:
             break
-        found[name] = value
+        received += 1
+        if completed_at <= deadline:
+            found[name] = value
     return found
 
 
@@ -545,8 +569,18 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
                 peers = [(c, a) for c, a in eligible if a["group"] == assessment["group"]]
                 if len(peers) > 1:
                     selected_score = assessment["headroom"]
-                    if sum(a["headroom"] == selected_score for _, a in peers) > 1:
-                        why += "; provider preference and candidate order broke the capacity tie"
+                    tied = [(c, a) for c, a in peers if a["headroom"] == selected_score]
+                    if len(tied) > 1:
+                        preferred = [(c, a) for c, a in tied
+                                     if validated["prefer"] and c["provider"] == validated["prefer"]]
+                        actors = []
+                        remaining_tie = tied
+                        if preferred and len(preferred) < len(tied):
+                            actors.append("provider preference")
+                            remaining_tie = preferred
+                        if len(remaining_tie) > 1:
+                            actors.append("candidate order")
+                        why += "; %s broke the capacity tie" % " and ".join(actors)
                     if selected_score is not None and any(
                             a["headroom"] is not None and a["headroom"] < selected_score for _, a in peers):
                         why += "; selected the greater measured budget headroom"

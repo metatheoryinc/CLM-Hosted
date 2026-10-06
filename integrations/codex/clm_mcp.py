@@ -77,9 +77,13 @@ def _audit_sink(cfg: dict):
     global _AUDIT
     with _AUDIT_LOCK:
         if _AUDIT is None:
-            upload_cfg = dict(cfg)
-            _AUDIT = TP.AuditQueue(lambda record: H.post(upload_cfg, "/v1/decisions", record, 0.25), maxsize=64)
-    return _AUDIT.submit
+            _AUDIT = TP.AuditQueue(lambda item: H.post(item[0], "/v1/decisions", item[1], 0.25), maxsize=64)
+
+    def submit(record):
+        return _AUDIT.submit((dict(cfg), record))
+
+    submit._clm_async_sink = True
+    return submit
 
 
 def _close_audit():
@@ -123,6 +127,8 @@ def pick(cfg: dict, task: str, task_name: str = "") -> dict:
 
 def pick_turn(cfg: dict, request: dict, *, now=None) -> dict:
     """MCP/library adapter for the shared turn policy."""
+    if not isinstance(request, dict):
+        raise ValueError("turn picker request must be an object")
     task, context = request.get("task"), request.get("context", "")
     prompt = str(task) + (("\n\nContext:\n" + str(context)) if context else "")
     state = H.subagent_state({"tool_input": {"description": "", "prompt": prompt,
@@ -143,17 +149,31 @@ def pick_turn(cfg: dict, request: dict, *, now=None) -> dict:
 
 
 def handle(msg: dict, cfg: dict) -> dict | None:
+    if not isinstance(msg, dict):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "invalid request: expected an object"}}
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:                                          # notifications need no reply
         return None
+    params = msg.get("params", {})
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return {"jsonrpc": "2.0", "id": mid,
+                "error": {"code": -32602, "message": "invalid params: expected an object"}}
     if method == "initialize":
-        result = {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
+        result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "clm", "version": "0.1.0"}}
     elif method == "tools/list":
         result = {"tools": [TOOL, TURN_TOOL]}
     elif method == "tools/call":
-        p = msg.get("params") or {}
-        args = p.get("arguments") or {}
+        p = params
+        args = p.get("arguments", {})
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            return {"jsonrpc": "2.0", "id": mid,
+                    "error": {"code": -32602, "message": "invalid params: arguments must be an object"}}
         if p.get("name") == TURN_TOOL["name"]:
             try:
                 selected = pick_turn(cfg, args)
@@ -181,9 +201,17 @@ def main() -> int:
         try:
             msg = json.loads(line)
         except ValueError:
+            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": None,
+                                         "error": {"code": -32700, "message": "parse error"}}) + "\n")
+            sys.stdout.flush()
             continue
-        cfg = H.load_config()                               # per call, so config edits apply at once
-        reply = handle(msg, cfg)
+        try:
+            cfg = H.load_config()                           # per call, so config edits apply at once
+            reply = handle(msg, cfg)
+        except Exception:  # noqa: BLE001  (one malformed call must not kill the MCP process)
+            mid = msg.get("id") if isinstance(msg, dict) else None
+            reply = {"jsonrpc": "2.0", "id": mid,
+                     "error": {"code": -32603, "message": "internal error"}}
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()

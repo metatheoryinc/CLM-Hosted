@@ -207,6 +207,20 @@ def test_reason_explains_both_headroom_ranking_and_a_tie_at_the_winning_score():
     assert got["provider"] == "claude" and "greater measured" in got["why"] and "tie" in got["why"]
 
 
+@pytest.mark.parametrize("prefer, menu, selected, phrase", [
+    (None, [candidate("codex", used=40), candidate("claude", used=40)], "codex", "candidate order"),
+    ("claude", [candidate("codex", used=40, model="a"), candidate("codex", used=40, model="b"),
+                candidate("claude", used=50)], "codex", "candidate order"),
+    ("claude", [candidate("codex", used=40), candidate("claude", used=40)], "claude", "provider preference"),
+])
+def test_tie_reason_names_only_the_actor_that_resolved_it(prefer, menu, selected, phrase):
+    c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
+    extra = {"prefer": prefer} if prefer else {}
+    got = pick_turn(request(*menu, **extra), c, now=lambda: NOW)
+    other = "candidate order" if phrase == "provider preference" else "provider preference"
+    assert got["provider"] == selected and phrase in got["why"] and other not in got["why"]
+
+
 def test_exactly_one_automatic_tier_drop_and_never_an_upgrade():
     c = classifier(result("opus", 0.9, {"haiku": 0.05, "sonnet": 0.05, "opus": 0.9}))
     got = pick_turn(request(candidate("codex", "opus", 95), candidate("claude", "sonnet", 20),
@@ -311,6 +325,55 @@ def test_classifiers_share_one_deadline_and_late_results_are_abandoned():
     assert got["fallback"] is True
 
 
+def test_saturated_optional_jev_does_not_discard_a_timely_clm_result(monkeypatch):
+    class SaturatedForJev:
+        def __init__(self):
+            self.calls = 0
+        def acquire(self, blocking=True, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                return True
+            if blocking and timeout:
+                time.sleep(timeout)
+            return False
+        def release(self):
+            pass
+    monkeypatch.setattr(turn_picker_module, "_CLASSIFICATION_SLOTS", SaturatedForJev())
+    clm = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
+    got = pick_turn(request(candidate("codex", used=10)), clm,
+                    config={"turn_pick_timeout_seconds": 0.02, "turn_pick_jev_enabled": True},
+                    jev_classifier=classifier(result("opus", 0.9)), now=lambda: NOW)
+    assert got["tier"] == "sonnet" and got["fallback"] is False
+
+
+def test_timed_out_classifier_work_is_globally_admission_bounded():
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+    release = threading.Event()
+    def slow(_state, _timeout):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            release.wait(1)
+            return result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05})
+        finally:
+            with lock:
+                active -= 1
+    cfg = {"turn_pick_timeout_seconds": 0.001}
+    req = request(candidate("codex", used=10))
+    try:
+        for _ in range(40):
+            assert pick_turn(req, slow, config=cfg, now=lambda: NOW)["fallback"] is True
+        classifier_threads = [t for t in threading.enumerate() if t.name.startswith("clm-turn-pick-clm")]
+        assert maximum <= turn_picker_module.MAX_INFLIGHT_CLASSIFICATIONS
+        assert len(classifier_threads) <= turn_picker_module.MAX_INFLIGHT_CLASSIFICATIONS
+    finally:
+        release.set()
+
+
 def test_audit_contains_replay_data_is_redacted_and_sink_failure_does_not_change_pick():
     records = []
     c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
@@ -391,3 +454,29 @@ def test_audit_queue_worker_exits_after_a_full_queue_is_closed():
     release.set()
     queue._thread.join(1)
     assert not queue._thread.is_alive()
+
+
+def test_submit_racing_close_never_reports_a_record_accepted_behind_the_sentinel():
+    processed = []
+    queue = AuditQueue(processed.append, maxsize=2)
+    original = queue._queue.put_nowait
+    entered, release = threading.Event(), threading.Event()
+    record = {"race": True}
+    def blocked_put(item):
+        if item is record:
+            entered.set()
+            release.wait(1)
+        return original(item)
+    queue._queue.put_nowait = blocked_put
+    accepted = []
+    submitter = threading.Thread(target=lambda: accepted.append(queue.submit(record)))
+    submitter.start()
+    assert entered.wait(1)
+    closer = threading.Thread(target=lambda: queue.close(timeout=1))
+    closer.start()
+    time.sleep(0.02)
+    release.set()
+    submitter.join(1)
+    closer.join(1)
+    assert not submitter.is_alive() and not closer.is_alive()
+    assert accepted == [True] and processed == [record]

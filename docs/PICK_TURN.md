@@ -276,6 +276,11 @@ failure must not alter or delay a returned pick. No logging thread may
 prevent process exit. A timed-out RPC is abandoned; late replies must not
 be mistaken for the next turn's response.
 
+Classification admission is capped at four active calls per process, shared
+by CLM and optional Jev. A timed-out call keeps its slot until it finishes;
+waiting for a slot uses the same request deadline. Saturation falls back
+safely, and a timely CLM result remains usable when Jev cannot finish.
+
 Log CLM decisions to workflow **`routing/turn-picks`**, using the existing
 D1 record envelope (`id`, `created_at`, `mode`, `state`, `questions`,
 `clm`, `acted`, `worker`, `meta`). `worker` is the selected tier; model/provider

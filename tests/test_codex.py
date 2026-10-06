@@ -234,6 +234,14 @@ def test_pick_turn_validation_is_an_mcp_error(tmp_path):
     assert "non-empty" in reply["result"]["content"][0]["text"]
 
 
+def test_pick_turn_library_adapter_rejects_a_non_object_request():
+    spec2 = importlib.util.spec_from_file_location("clm_mcp_direct_validation_test", MCP)
+    mcp = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mcp)
+    with pytest.raises(ValueError, match="request must be an object"):
+        mcp.pick_turn({}, [])
+
+
 def test_pick_turn_audit_upload_does_not_delay_the_result(monkeypatch):
     spec2 = importlib.util.spec_from_file_location("clm_mcp_async_test", MCP)
     mcp = importlib.util.module_from_spec(spec2)
@@ -257,6 +265,27 @@ def test_pick_turn_audit_upload_does_not_delay_the_result(monkeypatch):
     mcp._close_audit()
 
 
+def test_pick_turn_audit_uses_each_calls_current_config(monkeypatch):
+    spec2 = importlib.util.spec_from_file_location("clm_mcp_config_rotation_test", MCP)
+    mcp = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mcp)
+    uploads = []
+    monkeypatch.setattr(mcp.H, "post", lambda cfg, _path, record, _timeout:
+                        uploads.append((cfg["base_url"], cfg["api_key"], record["meta"]["caller"])))
+    req = {"task": "manual", "caller": "first", "requested_tier": "sonnet",
+           "candidates": [turn_candidate("codex", 10)]}
+    mcp.pick_turn({"base_url": "https://one.invalid", "api_key": "key-one"}, req,
+                  now=lambda: 1_791_300_000)
+    mcp.pick_turn({"base_url": "https://two.invalid", "api_key": "key-two"}, {**req, "caller": "second"},
+                  now=lambda: 1_791_300_000)
+    deadline = __import__("time").time() + 1
+    while len(uploads) < 2 and __import__("time").time() < deadline:
+        __import__("time").sleep(0.01)
+    mcp._close_audit()
+    assert uploads == [("https://one.invalid", "key-one", "first"),
+                       ("https://two.invalid", "key-two", "second")]
+
+
 def test_installed_mcp_runs_in_isolation_on_system_python39(tmp_path):
     p = run_install(tmp_path, "--key", "k")
     assert p.returncode == 0, p.stderr
@@ -277,6 +306,22 @@ def test_a_bad_call_is_an_error_not_a_crash(tmp_path):
     finally:
         clm.srv.shutdown()
     assert r["result"]["isError"] is True and u["error"]["code"] == -32601
+
+
+def test_malformed_jsonrpc_values_do_not_kill_the_mcp_loop(tmp_path):
+    clm = FakeCLM()
+    try:
+        replies = mcp_session(
+            tmp_path, clm.url,
+            [], "bad", 7,
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "clm_pick_turn", "arguments": "bad"}},
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"})
+    finally:
+        clm.srv.shutdown()
+    assert replies[-1] == {"jsonrpc": "2.0", "id": 3, "result": {}}
+    assert [r["error"]["code"] for r in replies[:-1]] == [-32600, -32600, -32600, -32602, -32602]
 
 
 def test_the_pick_tool_is_allowed_without_a_prompt_once(tmp_path):
