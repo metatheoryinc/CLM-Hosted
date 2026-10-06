@@ -108,7 +108,11 @@ jobs:
           if [ "${{ steps.image.outputs.changed }}" = true ]; then
             pulumi config set imageTag "${{ steps.image.outputs.tag }}" --stack "$STACK"
           fi
-          pulumi preview --stack "$STACK" --json > preview.json
+          if ! pulumi preview --stack "$STACK" --json > preview.json; then
+            # in --json mode Pulumi writes its errors into the JSON, not the log
+            jq -r '.diagnostics[]? | "\(.severity): \(.message)"' preview.json 2>/dev/null || cat preview.json
+            exit 1
+          fi
           changes=$(jq '[.changeSummary // {} | to_entries[] | select(.key != "same") | .value] | add // 0' preview.json)
           replaced=$(jq -r '[.steps[]? | select(.op == "replace" or .op == "create-replacement" or .op == "delete-replaced") | .urn] | unique | .[]' preview.json)
           echo "changes=$([ "$changes" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
