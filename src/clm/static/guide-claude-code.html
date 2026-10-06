@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install, sign in to, and verify the CLM plugin for Claude Code.">
+  <title>CLM for Claude Code — setup guide</title>
+  <link rel="stylesheet" href="/home.css">
+  <script src="/home.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#guide">Skip to guide</a><div class="top-rule"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="CLM and MipMap home">
+      <svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path class="mark-branch" d="M10 49C24 49 26 22 45 22M10 49c14 1 16 27 35 27"/><circle class="mark-ring" cx="52" cy="22" r="5"/><circle class="mark-ring" cx="52" cy="76" r="5"/><path class="mark-trunk" d="M8 49h71"/><circle class="mark-node" cx="50" cy="49" r="6"/><circle class="mark-end" cx="79" cy="49" r="13"/><path class="mark-check" d="m71 49 6 7 11-14"/></svg>
+      <span>CLM <i>+</i> MipMap</span>
+    </a>
+    <nav class="site-nav" aria-label="Primary navigation"><a href="/#clm">CLM</a><a href="/#mipmap">MipMap</a><a href="/#guides">Guides</a><a href="/playground">Playground</a><a class="nav-cta" href="/login">Sign in</a></nav>
+  </header>
+
+  <main id="guide" class="guide-main">
+    <header class="guide-hero">
+      <p class="breadcrumb"><a href="/">Home</a> / Guides / Claude Code</p>
+      <p class="kicker">CLM integration</p>
+      <h1>CLM for Claude Code</h1>
+      <p class="lede">Add model-aware subagent routing and end-of-turn behavior checks to an existing Claude Code setup. Tool-call gating starts in shadow mode.</p>
+      <div class="guide-meta"><span>about 5 minutes</span><span>hosted CLM</span><span>device sign-in</span></div>
+    </header>
+
+    <div class="guide-layout">
+      <aside class="guide-toc"><p>On this page</p><nav aria-label="Guide sections"><a href="#prerequisites">Prerequisites</a><a href="#install">Install</a><a href="#login">Sign in</a><a href="#verify">Verify</a><a href="#update">Update or remove</a><a href="#privacy">Privacy &amp; billing</a><a href="#help">Get help</a></nav></aside>
+      <article class="guide-content">
+        <section id="prerequisites">
+          <h2>Prerequisites</h2>
+          <ul>
+            <li>Claude Code installed and signed in to your Anthropic account.</li>
+            <li>Git available in your terminal so Claude Code can add this repository as a plugin marketplace.</li>
+            <li>A browser and a Metatheory team account for the CLM device sign-in.</li>
+          </ul>
+          <div class="callout neutral"><strong>What this adds</strong><p>The plugin can choose cheaper subagent tiers when confident, check completed turns for configured behavior problems, and classify tool calls in shadow mode. CLM can only make a tool decision stricter; it never overrides Claude Code to approve a call.</p></div>
+        </section>
+
+        <section id="install">
+          <span class="step-label">Step 1</span><h2>Add the marketplace and plugin</h2>
+          <p>Run both commands in a terminal. The first registers this public repository as a Claude Code marketplace; the second installs its <span class="inline-code">clm</span> plugin.</p>
+          <div class="command"><pre id="claude-install"><code>claude plugin marketplace add metatheoryinc/CLM-Hosted
+claude plugin install clm@clm-hosted</code></pre><button class="copy-button" type="button" data-copy="claude-install" aria-label="Copy installation commands">Copy</button></div>
+          <p>Start a new Claude Code session after installation so the lifecycle hooks load.</p>
+        </section>
+
+        <section id="login">
+          <span class="step-label">Step 2</span><h2>Sign in to hosted CLM</h2>
+          <p>Inside Claude Code, run:</p>
+          <div class="command"><pre id="claude-login"><code>/clm:login</code></pre><button class="copy-button" type="button" data-copy="claude-login" aria-label="Copy login command">Copy</button></div>
+          <p>Claude Code shows a browser link and short code. Open the link, sign in with your Metatheory Google account, and approve that code. The plugin stores the personal CLM key for future sessions.</p>
+          <div class="callout"><strong>The website does not show your key.</strong><p>The <a href="/login">Sign in</a> page approves device codes and lets you view or revoke issued keys. The device flow hands the new key directly back to the plugin.</p></div>
+        </section>
+
+        <section id="verify">
+          <span class="step-label">Step 3</span><h2>Verify the integration</h2>
+          <p>Start a new session, then ask the plugin for its current modes and recent actions:</p>
+          <div class="command"><pre id="claude-status"><code>/clm:status</code></pre><button class="copy-button" type="button" data-copy="claude-status" aria-label="Copy status command">Copy</button></div>
+          <p>You should see the key source, subagent mode, behavior-check mode and tool-call mode. When CLM changes something, Claude Code displays a short <span class="inline-code">CLM: …</span> notice explaining what happened.</p>
+          <p>Use <span class="inline-code">/clm:off</span> and <span class="inline-code">/clm:on</span> to pause or resume the plugin across sessions.</p>
+        </section>
+
+        <section id="update">
+          <h2>Update, configure or remove</h2>
+          <div class="command"><pre id="claude-update"><code>claude plugin update clm@clm-hosted</code></pre><button class="copy-button" type="button" data-copy="claude-update" aria-label="Copy update command">Copy</button></div>
+          <p>Open <span class="inline-code">/plugin</span> in Claude Code to configure the three integration switches, disable the plugin, or uninstall it. Revoke a personal key at <a href="/login">the CLM sign-in page</a> if the machine no longer needs access.</p>
+        </section>
+
+        <section id="privacy">
+          <h2>What leaves your machine</h2>
+          <p>For a classified tool call, the hosted service receives the tool name, bounded arguments, working directory and permission mode. With behavior checks enabled, it also receives a bounded rendering of recent prompts, messages, tool calls, results and the final reply. Likely secrets are redacted before sending, but redaction is best effort.</p>
+          <p>Decision records are stored in the shared CLM collector under your agent identity. Full transcript files and content outside the bounded rendering are not uploaded by the hook.</p>
+          <h3>Billing</h3>
+          <p>Claude Code agent turns and any unsure-case judge calls use your Anthropic account. CLM is a separate decision service; model availability and subscription limits still come from your provider account. Routing may reduce usage in some cases, but savings are not guaranteed.</p>
+        </section>
+
+        <section id="help">
+          <h2>Get help</h2>
+          <p>Check status first; any CLM error or timeout leaves the normal Claude Code flow in place. The source guide documents modes, thresholds and local configuration in more detail.</p>
+          <div class="guide-links"><a href="https://github.com/metatheoryinc/CLM-Hosted/blob/main/integrations/claude_code/README.md">Full integration reference →</a><a href="https://github.com/metatheoryinc/CLM-Hosted/issues">Report an issue →</a></div>
+          <nav class="guide-next" aria-label="Other guides"><a href="/guides/mipmap">← MipMap</a><a href="/guides/codex">Codex →</a></nav>
+        </section>
+      </article>
+    </div>
+  </main>
+  <div id="copy-status" class="copy-status" role="status" aria-live="polite" hidden></div>
+  <footer class="site-footer"><div class="shell footer-inner"><a class="brand footer-brand" href="/">CLM <i>+</i> MipMap</a><p>Decision infrastructure and durable context for developer agents.</p><nav aria-label="Footer navigation"><a href="/playground">Playground</a><a href="/login">Manage keys</a></nav></div></footer>
+</body>
+</html>

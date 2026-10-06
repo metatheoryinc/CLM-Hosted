@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Set up MipMap local conversation memory, Anthropic summarization, and optional hosted CLM routing.">
+  <title>MipMap — setup guide</title>
+  <link rel="stylesheet" href="/home.css">
+  <script src="/home.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#guide">Skip to guide</a><div class="top-rule"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="CLM and MipMap home"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path class="mark-branch" d="M10 49C24 49 26 22 45 22M10 49c14 1 16 27 35 27"/><circle class="mark-ring" cx="52" cy="22" r="5"/><circle class="mark-ring" cx="52" cy="76" r="5"/><path class="mark-trunk" d="M8 49h71"/><circle class="mark-node" cx="50" cy="49" r="6"/><circle class="mark-end" cx="79" cy="49" r="13"/><path class="mark-check" d="m71 49 6 7 11-14"/></svg><span>CLM <i>+</i> MipMap</span></a>
+    <nav class="site-nav" aria-label="Primary navigation"><a href="/#clm">CLM</a><a href="/#mipmap">MipMap</a><a href="/#guides">Guides</a><a href="/playground">Playground</a><a class="nav-cta" href="/login">Sign in</a></nav>
+  </header>
+
+  <main id="guide" class="guide-main">
+    <header class="guide-hero">
+      <p class="breadcrumb"><a href="/">Home</a> / Guides / MipMap</p><p class="kicker">Local conversation</p>
+      <h1>Set up MipMap</h1>
+      <p class="lede">Run one durable terminal conversation across projects, keep recent context detailed, and let the agent recover older source messages when it needs them.</p>
+      <div class="guide-meta"><span>local memory</span><span>Node 24 recommended</span><span>paid summarization</span></div>
+    </header>
+
+    <div class="guide-layout">
+      <aside class="guide-toc"><p>On this page</p><nav aria-label="Guide sections"><a href="#prerequisites">Prerequisites</a><a href="#install">Install</a><a href="#anthropic">Anthropic key</a><a href="#start">Start a chat</a><a href="#login">Enable CLM routing</a><a href="#verify">Verify &amp; inspect</a><a href="#update">Update</a><a href="#privacy">Privacy &amp; billing</a><a href="#help">Get help</a></nav></aside>
+      <article class="guide-content">
+        <section id="prerequisites">
+          <h2>Prerequisites</h2>
+          <ul><li>A recent Node.js release (Node 24 recommended), pnpm and Git.</li><li>Codex CLI or Claude Code installed and signed in. Automatic mode uses whichever authenticated agents are available.</li><li>An Anthropic API key with billing enabled for MipMap's separate summarization calls.</li><li>Optional: tmux for the split chat, status and activity layout.</li></ul>
+          <div class="callout neutral"><strong>Two separate jobs</strong><p>Your installed Codex or Claude CLI handles agent turns. Anthropic's API handles conversation summaries. A provider subscription for agent turns does not pay for the Anthropic API summaries.</p></div>
+        </section>
+
+        <section id="install">
+          <span class="step-label">Step 1</span><h2>Clone and install</h2>
+          <div class="command"><pre id="mipmap-install"><code>git clone https://github.com/metatheoryinc/mem-mipmap.git
+cd mem-mipmap
+pnpm install</code></pre><button class="copy-button" type="button" data-copy="mipmap-install" aria-label="Copy installation commands">Copy</button></div>
+          <p>Commands in this guide run from the cloned <span class="inline-code">mem-mipmap</span> repository.</p>
+        </section>
+
+        <section id="anthropic">
+          <span class="step-label">Step 2</span><h2>Add the Anthropic summarization key</h2>
+          <p>Create <span class="inline-code">~/.mipmap/.env</span> and add your own Anthropic API key:</p>
+          <div class="command"><pre id="mipmap-env"><code>ANTHROPIC_API_KEY=your-key-here</code></pre><button class="copy-button" type="button" data-copy="mipmap-env" aria-label="Copy environment template">Copy</button></div>
+          <p>Keep this file private. MipMap also reads an existing process environment and a repository <span class="inline-code">.env</span>; existing environment variables take precedence.</p>
+          <div class="callout"><strong>Separate paid API usage</strong><p>Summarization makes Anthropic API calls and can incur charges. It does not use Claude subscription billing. Run the estimate command before importing a large history.</p></div>
+        </section>
+
+        <section id="start">
+          <span class="step-label">Step 3</span><h2>Start your ongoing chat</h2>
+          <p>Choose the repository where the agent should work:</p>
+          <div class="command"><pre id="mipmap-chat"><code>pnpm mipmap chat -C /path/to/your/project</code></pre><button class="copy-button" type="button" data-copy="mipmap-chat" aria-label="Copy chat command">Copy</button></div>
+          <p>For chat, status and activity in one tmux session:</p>
+          <div class="command"><pre id="mipmap-tmux"><code>pnpm mipmap tmux -C /path/to/your/project</code></pre><button class="copy-button" type="button" data-copy="mipmap-tmux" aria-label="Copy tmux command">Copy</button></div>
+          <p>MipMap records the conversation in its local memory directory. Relaunching the same command returns to that memory rather than beginning with an empty thread.</p>
+        </section>
+
+        <section id="login">
+          <span class="step-label">Optional step</span><h2>Enable hosted CLM routing</h2>
+          <p>In the MipMap chat, enter:</p>
+          <div class="command"><pre id="mipmap-login"><code>/login</code></pre><button class="copy-button" type="button" data-copy="mipmap-login" aria-label="Copy login command">Copy</button></div>
+          <p>MipMap opens the hosted CLM device flow. Sign in with your Metatheory Google account and approve the code. The returned key is saved for MipMap only in <span class="inline-code">~/.mipmap/clm.json</span>.</p>
+          <p>With routing enabled, CLM chooses the provider, model and effort for each turn from MipMap's currently permitted menu. The routing request includes the current task, brief context, permitted model options and available quota estimates. It never includes the complete memory view. The raw quota cache stays local.</p>
+          <div class="callout neutral"><strong>Routing is not the lifecycle integration.</strong><p>MipMap does not install CLM's Claude Code or Codex behavior hooks. Follow the separate <a href="/guides/claude-code">Claude Code</a> or <a href="/guides/codex">Codex</a> guide if you also want those checks.</p></div>
+        </section>
+
+        <section id="verify">
+          <h2>Verify and inspect</h2>
+          <div class="command"><pre id="mipmap-status"><code>pnpm mipmap status
+pnpm mipmap usage
+pnpm mipmap estimate</code></pre><button class="copy-button" type="button" data-copy="mipmap-status" aria-label="Copy inspection commands">Copy</button></div>
+          <ul><li><span class="inline-code">status</span> shows the current agent, summarizer, memory and routing state.</li><li><span class="inline-code">usage</span> summarizes recorded agent-turn and summarizer usage.</li><li><span class="inline-code">estimate</span> estimates pending summarization work without making model calls. It is not a spending cap.</li></ul>
+          <p>Use <span class="inline-code">pnpm mipmap browse --open</span> to inspect local conversation history, or <span class="inline-code">pnpm mipmap activity</span> to follow the activity log.</p>
+        </section>
+
+        <section id="update">
+          <h2>Update MipMap</h2>
+          <div class="command"><pre id="mipmap-update"><code>git pull
+pnpm install</code></pre><button class="copy-button" type="button" data-copy="mipmap-update" aria-label="Copy update commands">Copy</button></div>
+          <p>Run the commands in your <span class="inline-code">mem-mipmap</span> clone, then restart the chat or tmux session. Your memory directory is separate from the application clone.</p>
+        </section>
+
+        <section id="privacy">
+          <h2>What leaves your machine</h2>
+          <p>The append-only message log, summary tree, usage records and local Git history live in your MipMap memory directory. Treat that directory as private conversation data. Secret redaction runs before message text is stored, but it cannot guarantee that every sensitive value is removed.</p>
+          <p>Memory is local, but selected conversation content leaves the machine: agent context goes to the chosen Codex or Claude provider, and source material for summaries goes to Anthropic. If hosted CLM routing is enabled, the picker receives the current task, brief context, permitted model options and available quota estimates. It does not receive the complete MipMap memory or the raw local quota cache.</p>
+          <h3>Billing</h3>
+          <p>Agent turns use the authentication and billing of the selected installed CLI. Summaries make separately billed Anthropic API calls. Hosted CLM authentication is separate from both, and choosing a model does not reserve provider quota or guarantee availability.</p>
+        </section>
+
+        <section id="help">
+          <h2>Get help</h2>
+          <p>Run <span class="inline-code">pnpm mipmap status</span> first. The project README covers terminal controls, imports, configuration variables and local memory inspection. No model call is needed to inspect status or run an estimate.</p>
+          <div class="guide-links"><a href="https://github.com/metatheoryinc/mem-mipmap/blob/main/Readme.MD">Full MipMap reference →</a><a href="https://github.com/metatheoryinc/mem-mipmap/issues">Report an issue →</a></div>
+          <nav class="guide-next" aria-label="Other guides"><a href="/guides/codex">← Codex</a><a href="/guides/claude-code">Claude Code →</a></nav>
+        </section>
+      </article>
+    </div>
+  </main>
+  <div id="copy-status" class="copy-status" role="status" aria-live="polite" hidden></div>
+  <footer class="site-footer"><div class="shell footer-inner"><a class="brand footer-brand" href="/">CLM <i>+</i> MipMap</a><p>Decision infrastructure and durable context for developer agents.</p><nav aria-label="Footer navigation"><a href="/playground">Playground</a><a href="/login">Manage keys</a></nav></div></footer>
+</body>
+</html>

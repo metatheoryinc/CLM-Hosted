@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Install, sign in to, and verify CLM lifecycle hooks for Codex.">
+  <title>CLM for Codex — setup guide</title>
+  <link rel="stylesheet" href="/home.css">
+  <script src="/home.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#guide">Skip to guide</a><div class="top-rule"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="CLM and MipMap home"><svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true"><path class="mark-branch" d="M10 49C24 49 26 22 45 22M10 49c14 1 16 27 35 27"/><circle class="mark-ring" cx="52" cy="22" r="5"/><circle class="mark-ring" cx="52" cy="76" r="5"/><path class="mark-trunk" d="M8 49h71"/><circle class="mark-node" cx="50" cy="49" r="6"/><circle class="mark-end" cx="79" cy="49" r="13"/><path class="mark-check" d="m71 49 6 7 11-14"/></svg><span>CLM <i>+</i> MipMap</span></a>
+    <nav class="site-nav" aria-label="Primary navigation"><a href="/#clm">CLM</a><a href="/#mipmap">MipMap</a><a href="/#guides">Guides</a><a href="/playground">Playground</a><a class="nav-cta" href="/login">Sign in</a></nav>
+  </header>
+
+  <main id="guide" class="guide-main">
+    <header class="guide-hero">
+      <p class="breadcrumb"><a href="/">Home</a> / Guides / Codex</p><p class="kicker">CLM integration</p>
+      <h1>CLM for Codex</h1>
+      <p class="lede">Install CLM's lifecycle hooks and the <span class="inline-code">clm_pick_model</span> tool, sign in with the device flow, then review the hooks when Codex next starts.</p>
+      <div class="guide-meta"><span>about 5 minutes</span><span>Codex 0.150+</span><span>Python 3.9+</span></div>
+    </header>
+
+    <div class="guide-layout">
+      <aside class="guide-toc"><p>On this page</p><nav aria-label="Guide sections"><a href="#prerequisites">Prerequisites</a><a href="#clone">Clone</a><a href="#install">Install &amp; sign in</a><a href="#verify">Verify</a><a href="#picker">Model picker</a><a href="#update">Update or remove</a><a href="#privacy">Privacy &amp; billing</a><a href="#help">Get help</a></nav></aside>
+      <article class="guide-content">
+        <section id="prerequisites">
+          <h2>Prerequisites</h2>
+          <ul><li>Codex 0.150 or newer, installed and signed in.</li><li>Git and Python 3.9 or newer available in your terminal.</li><li>A browser and Metatheory team account for CLM device sign-in.</li></ul>
+          <div class="callout neutral"><strong>What this adds</strong><p>The installer registers lifecycle hooks for behavior checks and tool-call observation, plus an MCP tool that helps the main agent choose a model for subagents. Codex keeps its own approval and sandbox rules.</p></div>
+        </section>
+
+        <section id="clone">
+          <span class="step-label">Step 1</span><h2>Clone the public repository</h2>
+          <div class="command"><pre id="codex-clone"><code>git clone https://github.com/metatheoryinc/CLM-Hosted.git
+cd CLM-Hosted</code></pre><button class="copy-button" type="button" data-copy="codex-clone" aria-label="Copy clone commands">Copy</button></div>
+          <p>The installer copies the integration into your Codex home. Keep the clone if you want to pull and reinstall updates later.</p>
+        </section>
+
+        <section id="install">
+          <span class="step-label">Step 2</span><h2>Install and sign in</h2>
+          <div class="command"><pre id="codex-install"><code>python3 integrations/codex/install.py</code></pre><button class="copy-button" type="button" data-copy="codex-install" aria-label="Copy installer command">Copy</button></div>
+          <p>When no key is already configured, the installer prints a link and short code. Open the link, sign in with your Metatheory Google account and approve the code. The key is stored in a private local config file shared with the Claude Code integration.</p>
+          <div class="callout"><strong>Review on the next launch</strong><p>The next time Codex starts, it asks you to review and trust the new hooks. They do not run until you accept them. The <a href="/login">Sign in</a> page approves device codes and manages issued keys; it does not display the returned secret.</p></div>
+        </section>
+
+        <section id="verify">
+          <span class="step-label">Step 3</span><h2>Verify the installation</h2>
+          <div class="command"><pre id="codex-status"><code>python3 integrations/codex/install.py status</code></pre><button class="copy-button" type="button" data-copy="codex-status" aria-label="Copy status command">Copy</button></div>
+          <p>Status reports the registered hook events, copied hook files and whether a CLM key is set. After you trust the hooks and start a session, behavior checks are active by default and tool-call classification remains in shadow mode.</p>
+        </section>
+
+        <section id="picker">
+          <h2>Enable subagent model picks</h2>
+          <p>The installer registers <span class="inline-code">clm_pick_model</span>. To make its use consistent, add the following instruction to your project's <span class="inline-code">AGENTS.md</span>:</p>
+          <div class="command"><pre id="codex-agents"><code>Before you call spawn_agent, call the clm_pick_model tool with the task exactly as you will give it to the subagent, and pass the model and reasoning_effort it returns to spawn_agent.</code></pre><button class="copy-button" type="button" data-copy="codex-agents" aria-label="Copy AGENTS instruction">Copy</button></div>
+          <p>The tool reads the subagent task and returns a configured Codex model and reasoning effort. It does not run the subagent or grant approval for other tools. If CLM is unavailable, it returns the configured middle-tier fallback.</p>
+        </section>
+
+        <section id="update">
+          <h2>Update or remove</h2>
+          <p>Pull the current repository and rerun the installer to update the copied files:</p>
+          <div class="command"><pre id="codex-update"><code>git pull
+python3 integrations/codex/install.py</code></pre><button class="copy-button" type="button" data-copy="codex-update" aria-label="Copy update commands">Copy</button></div>
+          <p>Remove the hooks, copied files and MCP registration with:</p>
+          <div class="command"><pre id="codex-remove"><code>python3 integrations/codex/install.py uninstall</code></pre><button class="copy-button" type="button" data-copy="codex-remove" aria-label="Copy uninstall command">Copy</button></div>
+          <p>Uninstall preserves the shared CLM config. Add <span class="inline-code">--purge</span> only if you also intend to delete that config and key.</p>
+        </section>
+
+        <section id="privacy">
+          <h2>What leaves your machine</h2>
+          <p>The Codex hooks use the same bounded, best-effort-redacted payloads as the Claude Code integration. Tool checks can send a tool name, clipped arguments, working directory and permission mode. Behavior checks can send a bounded rendering of recent prompts, messages, tool calls, results and the final reply. Codex transcript paths, encrypted reasoning and content outside that rendering are not sent by the hook.</p>
+          <p>The model picker sends the task passed to <span class="inline-code">clm_pick_model</span>. CLM decisions and labels are recorded in the shared collector under your agent identity.</p>
+          <h3>Billing</h3>
+          <p>Codex turns use your OpenAI account. When an uncertain behavior needs a judge, the integration runs a separate Codex command on that account. CLM does not supply provider capacity, and routing does not guarantee lower cost or better results.</p>
+        </section>
+
+        <section id="help">
+          <h2>Get help</h2>
+          <p>Run installer status first. If hooks are present but inactive, restart Codex and complete its hook review. The detailed reference covers configuration, shadow mode and manual status commands.</p>
+          <div class="guide-links"><a href="https://github.com/metatheoryinc/CLM-Hosted/blob/main/integrations/codex/README.md">Full integration reference →</a><a href="https://github.com/metatheoryinc/CLM-Hosted/issues">Report an issue →</a></div>
+          <nav class="guide-next" aria-label="Other guides"><a href="/guides/claude-code">← Claude Code</a><a href="/guides/mipmap">MipMap →</a></nav>
+        </section>
+      </article>
+    </div>
+  </main>
+  <div id="copy-status" class="copy-status" role="status" aria-live="polite" hidden></div>
+  <footer class="site-footer"><div class="shell footer-inner"><a class="brand footer-brand" href="/">CLM <i>+</i> MipMap</a><p>Decision infrastructure and durable context for developer agents.</p><nav aria-label="Footer navigation"><a href="/playground">Playground</a><a href="/login">Manage keys</a></nav></div></footer>
+</body>
+</html>

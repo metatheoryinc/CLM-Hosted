@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Keep one useful conversation with MipMap, and let CLM match available models to the work.">
+  <title>CLM + MipMap — context and model decisions for agents</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M8 50h71' stroke='%23bc2437' stroke-width='6'/%3E%3Ccircle cx='79' cy='50' r='13' fill='%23bc2437'/%3E%3Cpath d='m71 50 6 7 11-14' fill='none' stroke='white' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/home.css">
+  <script src="/home.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="top-rule"></div>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="CLM and MipMap home">
+      <svg class="brand-mark" viewBox="0 0 100 100" aria-hidden="true">
+        <path class="mark-branch" d="M10 49C24 49 26 22 45 22M10 49c14 1 16 27 35 27"/>
+        <circle class="mark-ring" cx="52" cy="22" r="5"/><circle class="mark-ring" cx="52" cy="76" r="5"/>
+        <path class="mark-trunk" d="M8 49h71"/><circle class="mark-node" cx="50" cy="49" r="6"/>
+        <circle class="mark-end" cx="79" cy="49" r="13"/><path class="mark-check" d="m71 49 6 7 11-14"/>
+      </svg>
+      <span>CLM <i>+</i> MipMap</span>
+    </a>
+    <nav class="site-nav" aria-label="Primary navigation">
+      <a href="#clm">CLM</a><a href="#mipmap">MipMap</a><a href="#guides">Guides</a>
+      <a href="/playground">Playground</a><a class="nav-cta" href="/login">Sign in</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span> Tools for long-running agent work</p>
+        <h1>Keep the context.<br><em>Match the model to the work.</em></h1>
+        <p class="hero-lede">MipMap keeps an ongoing local conversation useful as it grows. CLM—the Contrastive Language Model service—helps an agent choose among the models available to you and check for common mistakes in how the work gets done.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="/guides/mipmap">Set up MipMap <span aria-hidden="true">→</span></a>
+          <a class="button secondary" href="#guides">Install CLM</a>
+        </div>
+        <p class="hero-note">Use them together, or add CLM to Claude Code or Codex on its own.</p>
+      </div>
+      <div class="context-figure" role="img" aria-label="Older conversation is summarized at low resolution while recent messages remain detailed and source messages stay available">
+        <div class="figure-head"><span>one conversation</span><span>resolution</span></div>
+        <div class="memory-stack">
+          <div class="memory-layer far"><span>3 months ago</span><b></b><b></b></div>
+          <div class="memory-layer mid"><span>last month</span><b></b><b></b><b></b></div>
+          <div class="memory-layer near"><span>this week</span><b></b><b></b><b></b><b></b></div>
+          <div class="memory-layer now"><span>now</span><b></b><b></b><b></b><b></b><b></b></div>
+        </div>
+        <div class="figure-foot"><span>summary</span><span class="resolution-line"></span><span>source detail</span></div>
+      </div>
+    </section>
+
+    <section id="mipmap" class="feature-section shell">
+      <div class="section-intro">
+        <p class="kicker">01 · MipMap</p>
+        <h2>Return to the work with the thread intact.</h2>
+        <p>Imagine returning to a project after a week. The last decisions are still detailed, older work is visible as progressively smaller summaries, and the agent can open the original source messages when a detail matters. Like graphics mipmaps, the conversation is represented at different resolutions.</p>
+      </div>
+      <div class="feature-grid mipmap-grid">
+        <article class="feature-card accent-card"><span class="card-number">01</span><h3>Recent context stays close</h3><p>Each turn starts with a compact view of the conversation: recent messages in detail and older history at broader resolution.</p></article>
+        <article class="feature-card"><span class="card-number">02</span><h3>Original messages stay reachable</h3><p>The agent can zoom into summary ranges, search literal text, and inspect timestamps before relying on a remembered detail.</p></article>
+        <article class="feature-card"><span class="card-number">03</span><h3>Your working history stays local</h3><p>The durable log and summary tree live in your MipMap directory. Selected context still goes to the model providers that answer and summarize.</p></article>
+      </div>
+    </section>
+
+    <section id="clm" class="feature-section dark-section">
+      <div class="shell">
+        <div class="section-intro light">
+          <p class="kicker">02 · CLM</p>
+          <h2>Choose deliberately. Check the work.</h2>
+          <p>CLM is a hosted decision service. Its integrations can route suitable work among configured options and check an agent trace for specific behavior problems. The result is a decision, not a guarantee.</p>
+        </div>
+        <div class="scenario-grid">
+          <article class="scenario"><div class="scenario-icon">A</div><p class="scenario-label">Quick lookup</p><h3>Use a lighter available option when the task is bounded.</h3><p>A straightforward lookup should not need the same compute as a difficult investigation. CLM helps the agent choose a suitable available model for the task.</p></article>
+          <article class="scenario"><div class="scenario-icon">B</div><p class="scenario-label">Difficult debugging</p><h3>Keep stronger models available for work that needs them.</h3><p>Complexity, policy and provider capacity can all affect the choice. Availability still depends on your own provider account.</p></article>
+          <article class="scenario"><div class="scenario-icon">C</div><p class="scenario-label">Evidence matters</p><h3>Catch a testing claim without supporting evidence.</h3><p>The Claude Code and Codex integrations can flag common behavior mistakes at the end of a turn and ask the agent to verify or fix them.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="workflow-section shell">
+      <div class="section-intro compact"><p class="kicker">Together</p><h2>One thread, one task, the right amount of context.</h2></div>
+      <ol class="workflow" aria-label="Combined MipMap and CLM workflow">
+        <li><span>1</span><div><h3>Continue the conversation</h3><p>Open the same local MipMap memory, even when the project has been quiet.</p></div></li>
+        <li><span>2</span><div><h3>Ask for a change</h3><p>Your current request becomes the task for this turn.</p></div></li>
+        <li><span>3</span><div><h3>Choose from available models</h3><p>CLM reads the current request and chooses among your available models. Your full conversation history stays out of the routing request.</p></div></li>
+        <li><span>4</span><div><h3>Recover history and work</h3><p>The selected agent receives MipMap's compact view, opens source messages when needed, and works in your repository.</p></div></li>
+      </ol>
+      <aside class="clarifier"><strong>CLM works without MipMap.</strong><p>Install the Claude Code or Codex integration to add its lifecycle checks and routing helpers to an existing agent. MipMap's automatic turn routing does not install those hooks for you.</p></aside>
+    </section>
+
+    <section id="guides" class="guides-section">
+      <div class="shell">
+        <div class="section-intro compact"><p class="kicker">Get started</p><h2>Choose your entry point.</h2><p>Each guide covers prerequisites, sign-in, verification, billing and what leaves your machine.</p></div>
+        <div class="guide-grid">
+          <a class="guide-card" href="/guides/claude-code"><span class="guide-type">CLM integration</span><h3>Claude Code</h3><p>Install the marketplace plugin, sign in with the device flow, and inspect what CLM changes.</p><span class="guide-link">Open guide <b aria-hidden="true">→</b></span></a>
+          <a class="guide-card" href="/guides/codex"><span class="guide-type">CLM integration</span><h3>Codex</h3><p>Install the lifecycle hooks and model-picker tool, then review them on the next launch.</p><span class="guide-link">Open guide <b aria-hidden="true">→</b></span></a>
+          <a class="guide-card featured" href="/guides/mipmap"><span class="guide-type">Local conversation</span><h3>MipMap</h3><p>Start a durable terminal conversation with local memory and optional hosted CLM routing.</p><span class="guide-link">Open guide <b aria-hidden="true">→</b></span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="boundaries shell" aria-labelledby="boundaries-title">
+      <h2 id="boundaries-title">Know the boundaries</h2>
+      <div class="boundary-grid">
+        <div><strong>Models</strong><p>Your Codex or Claude account supplies agent turns. CLM chooses only among options offered to it.</p></div>
+        <div><strong>Memory</strong><p>MipMap stores its durable memory locally. Relevant content goes to your selected agent and summarizer.</p></div>
+        <div><strong>Billing</strong><p>MipMap summarization makes separately billed Anthropic API calls; it does not use a Claude subscription.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer"><div class="shell footer-inner"><a class="brand footer-brand" href="/">CLM <i>+</i> MipMap</a><p>Decision infrastructure and durable context for developer agents.</p><nav aria-label="Footer navigation"><a href="/playground">Playground</a><a href="https://github.com/metatheoryinc/CLM-Hosted">CLM source</a><a href="https://github.com/metatheoryinc/mem-mipmap">MipMap source</a><a href="/login">Manage keys</a></nav></div></footer>
+</body>
+</html>
