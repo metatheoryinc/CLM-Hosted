@@ -20,7 +20,8 @@ Codex plugins cannot carry hooks, so a script installs it. From a clone of this 
 python3 integrations/codex/install.py
 ```
 
-It asks for the agent key (or takes `--key` / `CLM_API_KEY`), copies the hook to
+Without a key it signs you in: it prints a link and a short code, you approve it with your
+Metatheory Google account, and it saves your personal key (or takes `--key` / `CLM_API_KEY`). It copies the hook to
 `~/.codex/clm/`, registers it in `~/.codex/hooks.json` (keeping your other hooks; a backup is
 kept) and stores the key in `~/.config/clm/claude-code.json` (mode 600), the same file the
 Claude Code plugin falls back to. **The next time Codex starts it asks you to review and trust

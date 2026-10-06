@@ -37,7 +37,8 @@ CI runs the same (`.github/workflows/tests.yml`); the image only builds when tes
 
 ## Rules
 
-- **Never print, log or commit keys.** Agent keys live in Pulumi config (`agentKeys`) and in
+- **Never print, log or commit keys.** People get personal keys by signing in (`/clm:login`, device login
+  at `/login` through Cloudflare Access); the gateway stores only their hashes. Static agent keys live in Pulumi config (`agentKeys`) and in
   `~/.config/clm/claude-code.json` (mode 600). Everyone uses the `default` agent key; the `admin`
   key is only for `/v1/admin/*` (`clm-heads upload`). Read keys into env vars, never echo them.
 - **Don't run `pulumi up`.** The maintainer runs it; propose the change and say what it will do.

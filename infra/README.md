@@ -29,7 +29,8 @@ You need a RunPod API key (Settings → API Keys) and a Cloudflare API token.
 The Cloudflare API token needs, for the account: **Cloudflare Tunnel: Edit**,
 **Workers Scripts: Edit** and **D1: Edit**; for the `metatheory.dev` zone: **Zone: Read**,
 **DNS: Edit** and **Workers Routes: Edit**. Zero Trust must be enabled on the account (the free
-plan is enough) for tunnels.
+plan is enough) for tunnels. For personal keys (below) it also needs **Access: Apps and Policies:
+Edit** and **Access: Organizations, Identity Providers, and Groups: Edit**.
 
 ## One-time setup
 
@@ -111,10 +112,45 @@ any request whose response takes over 100 s, so send large best-of-N sets in
 several calls. The gateway logs each request's agent, path,
 status and latency to Workers Logs.
 
+## Personal keys (Google sign-in)
+
+People get their own key by signing in at `https://<hostname>/login` with a Google Workspace
+account in `allowedEmailDomain` (metatheory.gg). Agents do it without copy-paste: `/clm:login` in
+Claude Code, or the Codex installer, starts a device login, prints a short code, and saves the key
+once it's approved in the browser. A personal key names its owner's email as the agent, so
+logs, rate limits and `clm-decisions` reads are per person; it lasts until its owner (or an
+admin, listed by email in `adminAgents`) revokes it at `/login`. Keys are stored only as hashes.
+
+Setup, once:
+
+1. **Zero Trust team domain.** In the Cloudflare dashboard, Zero Trust → Settings → Custom
+   pages shows the team domain (`<team>.cloudflareaccess.com`); pick one when first enabling
+   Zero Trust.
+2. **Google OAuth client.** In the Google Cloud project of the Workspace: APIs & Services →
+   Credentials → Create credentials → OAuth client ID → Web application. Authorized JavaScript
+   origin `https://<team>.cloudflareaccess.com`; authorized redirect URI
+   `https://<team>.cloudflareaccess.com/cdn-cgi/access/callback`. On the consent screen choose
+   **Internal**, so only Workspace accounts can use it.
+3. **Config and deploy:**
+
+```bash
+pulumi config set accessTeamDomain <team>.cloudflareaccess.com
+pulumi config set googleClientId <client id>
+pulumi config set --secret googleClientSecret <client secret>
+pulumi config set --path 'adminAgents[1]' you@metatheory.gg
+pulumi config set --path 'decisionReaders[0]' you@metatheory.gg
+pulumi up
+```
+
+`adminAgents` and `decisionReaders` take emails for personal keys (keep `admin` for
+`clm-heads upload` until you upload with your own key). Then open `https://<hostname>/login`
+to check the sign-in. To retire the shared `default` key, remove it from `agentKeys` once everyone
+has run `/clm:login`; records made with it stay attributed to `default`.
+
 ## Agents
 
-Agent keys live in the `agentKeys` JSON. To add or revoke one, edit it and
-redeploy the Worker (the Pod is unaffected):
+Static agent keys (for CI or service accounts) live in the `agentKeys` JSON. To add or revoke
+one, edit it and redeploy the Worker (the Pod is unaffected):
 
 ```bash
 pulumi config get agentKeys

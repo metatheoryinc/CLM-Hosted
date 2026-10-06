@@ -73,7 +73,22 @@ config:
     items:
       type: string
     default: []
-    # agent names (keys of agentKeys) that may use /v1/admin/* (uploading trained heads)
+    # agent names (keys of agentKeys) that may use /v1/admin/* (uploading trained heads);
+    # a personal key's agent name is its owner's email, so admins can be listed by email
+  # ── personal keys: Google sign-in through Cloudflare Access (infra/README.md) ──
+  accessTeamDomain:
+    type: string
+    # the Zero Trust team domain, <team>.cloudflareaccess.com (Zero Trust → Settings → Custom pages)
+  googleClientId:
+    type: string
+    # a Google OAuth client (Web application) in the Workspace's Google Cloud project
+  googleClientSecret:
+    type: string
+    secret: true
+  allowedEmailDomain:
+    type: string
+    default: metatheory.gg
+    # only Google Workspace accounts in this domain can sign in and get a key
 
 resources:
   # The new provider (github.com/runpod/pulumi-runpod) is not on PyPI; the plugin comes
@@ -170,6 +185,15 @@ resources:
           type: plain_text
           text:
             fn::toJSON: ${adminAgents}
+        - name: ACCESS_TEAM_DOMAIN
+          type: plain_text
+          text: ${accessTeamDomain}
+        - name: ACCESS_AUD
+          type: plain_text
+          text: ${loginApp.aud}
+        - name: ALLOWED_EMAIL_DOMAIN
+          type: plain_text
+          text: ${allowedEmailDomain}
         - name: LIMITER
           type: ratelimit
           namespaceId: ${rateLimitNamespaceId}
@@ -185,6 +209,56 @@ resources:
       zoneId: ${cloudflareZoneId}
       pattern: ${hostname}/*
       script: ${gateway.scriptName}
+    options:
+      provider: ${cloudflare}
+
+  # ── Cloudflare Access: who may sign in at /login and get a personal key ───
+
+  googleIdp:
+    type: cloudflare:ZeroTrustAccessIdentityProvider
+    properties:
+      accountId: ${cloudflareAccountId}
+      name: Google (${allowedEmailDomain})
+      type: google-apps          # Google Workspace: accounts of appsDomain only
+      config:
+        appsDomain: ${allowedEmailDomain}
+        clientId: ${googleClientId}
+        clientSecret: ${googleClientSecret}
+    options:
+      provider: ${cloudflare}
+
+  loginPolicy:
+    type: cloudflare:ZeroTrustAccessPolicy
+    properties:
+      accountId: ${cloudflareAccountId}
+      name: clm-${pulumi.stack} ${allowedEmailDomain} only
+      decision: allow
+      includes:
+        - emailDomain:
+            domain: ${allowedEmailDomain}
+    options:
+      provider: ${cloudflare}
+
+  loginApp:
+    type: cloudflare:ZeroTrustAccessApplication
+    properties:
+      accountId: ${cloudflareAccountId}
+      name: CLM keys (${pulumi.stack})
+      type: self_hosted
+      destinations:
+        # the key pages only; the API stays on agent keys (the Worker re-checks the Access token too)
+        - type: public
+          uri: ${hostname}/login
+        - type: public
+          uri: ${hostname}/login/*
+      allowedIdps:
+        - ${googleIdp.id}
+      autoRedirectToIdentity: true
+      appLauncherVisible: false
+      sessionDuration: 24h
+      policies:
+        - id: ${loginPolicy.id}
+          precedence: 1
     options:
       provider: ${cloudflare}
 
@@ -249,5 +323,6 @@ variables:
 
 outputs:
   url: https://${hostname}
+  loginUrl: https://${hostname}/login
   podId: ${pod.podId}
   costPerHr: ${pod.costPerHr}

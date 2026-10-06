@@ -1,6 +1,6 @@
 {
   "name": "clm",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "CLM in Claude Code: cheaper subagent models when CLM is confident, behavior checks when a turn ends, and a shadow classifier for tool calls.",
   "author": {
     "name": "Metatheory"
@@ -10,10 +10,10 @@
   "userConfig": {
     "api_key": {
       "type": "string",
-      "title": "CLM agent key",
+      "title": "CLM agent key (optional)",
       "sensitive": true,
-      "required": true,
-      "description": "The agent key for the CLM stack (ask whoever runs it). Stored in your keychain."
+      "required": false,
+      "description": "Leave empty and run /clm:login to get a personal key with your Metatheory Google account. Only for a key you were given by hand; stored in your keychain."
     },
     "base_url": {
       "type": "string",

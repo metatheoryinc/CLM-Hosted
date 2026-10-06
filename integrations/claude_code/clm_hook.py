@@ -195,6 +195,10 @@ def raw_log(event: dict, path: str) -> None:
         f.write(json.dumps({"logged_at": now(), **event}, ensure_ascii=False, default=str) + "\n")
 
 
+def config_path() -> str:
+    return os.environ.get("CLM_HOOK_CONFIG") or os.path.expanduser("~/.config/clm/claude-code.json")
+
+
 def data_dir() -> str:
     """Local state: the plugin's data dir (Claude Code), ~/.codex/clm (Codex), else ~/.config/clm."""
     if os.environ.get("CLAUDE_PLUGIN_DATA"):
@@ -217,7 +221,8 @@ def load_config() -> dict:
         cfg.update(PLUGIN_DEFAULTS)
     if codex:
         cfg.update(CODEX_DEFAULTS)
-    path = os.environ.get("CLM_HOOK_CONFIG") or os.path.expanduser("~/.config/clm/claude-code.json")
+    path = config_path()
+    file_cfg: dict = {}
     try:
         with open(path, encoding="utf-8") as f:
             file_cfg = json.load(f)
@@ -230,6 +235,8 @@ def load_config() -> dict:
     if plugin:
         for opt, key in PLUGIN_OPTIONS.items():
             v = os.environ.get(f"CLAUDE_PLUGIN_OPTION_{opt.upper()}", "").strip()
+            if opt == "api_key" and isinstance(file_cfg, dict) and file_cfg.get("api_key_source") == "login":
+                continue                     # a personal key from /clm:login wins over a pasted one
             if v:
                 cfg[key] = v
         for opt, key in PLUGIN_SWITCHES.items():               # on: active, off: shadow (still logged)
@@ -740,6 +747,82 @@ def check_behaviors(event: dict, cfg: dict, key: str) -> dict | None:
                       + " If a flag is wrong, say so in one sentence and stop."}
 
 
+# ── /clm:login: a personal key through Google sign-in (device login) ──────
+
+DEFAULT_BASE_URL = "https://clm.metatheory.dev"
+
+
+def _post_open(url: str, body: dict, timeout: float = 15) -> tuple[int, dict]:
+    """POST without a key (the device-login endpoints are open); -> (status, JSON body)."""
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": "clm-claude-code-hook/1"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.load(e)
+        except ValueError:
+            return e.code, {}
+
+
+def login_start(label: str | None = None) -> dict:
+    cfg = load_config()
+    base = (cfg.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    import socket
+    who = "codex" if os.environ.get("CLM_HOOK_RUNTIME") == "codex" else "claude-code"
+    code, d = _post_open(base + "/v1/auth/device", {"label": label or f"{socket.gethostname()} · {who}"})
+    if code != 200:
+        raise SystemExit(f"CLM login could not start ({code}): {d.get('detail') or d}")
+    pending = {"base_url": base, "device_code": d["device_code"], "user_code": d["user_code"],
+               "verification_uri": d["verification_uri"], "interval": d.get("interval", 3),
+               "expires_at": time.time() + float(d.get("expires_in", 600))}
+    os.makedirs(data_dir(), exist_ok=True)
+    fd = os.open(os.path.join(data_dir(), "login.json"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(pending, f)
+    return pending
+
+
+def login_finish(wait: float = 590) -> str:
+    """Poll until the code is approved, then save the key. -> the signed-in email."""
+    path = os.path.join(data_dir(), "login.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            p = json.load(f)
+    except (OSError, ValueError):
+        raise SystemExit("no CLM login in progress: run --login start first")
+    deadline = min(p["expires_at"], time.time() + wait)
+    while time.time() < deadline:
+        code, d = _post_open(p["base_url"] + "/v1/auth/token", {"device_code": p["device_code"]})
+        if code == 200:
+            save_key(p["base_url"], d["api_key"], d["email"])
+            os.remove(path)
+            return d["email"]
+        if code != 428:
+            os.remove(path)
+            raise SystemExit(f"CLM login failed ({code}): {d.get('error') or d.get('detail') or d}; run the login again")
+        time.sleep(float(p.get("interval", 3)))
+    raise SystemExit("not approved yet: approve the code in the browser, then run --login finish again")
+
+
+def save_key(base_url: str, key: str, email: str) -> None:
+    path = config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        cfg = {}
+    cfg.update(base_url=cfg.get("base_url") or base_url, api_key=key, api_key_source="login", api_key_email=email)
+    if cfg.get("mode") == "off":
+        cfg.pop("mode")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(cfg, indent=2) + "\n")
+    os.replace(path + ".tmp", path)
+
+
 def status() -> str:
     cfg = load_config()
     state = "PAUSED (/clm:on resumes)" if paused() else "OFF" if cfg.get("mode") not in ("shadow", "active") else "on"
@@ -747,7 +830,7 @@ def status() -> str:
              f"tool calls {cfg.get('mode')}, subagent models "
              f"{'logged only (Codex)' if os.environ.get('CLM_HOOK_RUNTIME') == 'codex' else cfg.get('subagent_mode')}, "
              f"behavior checks {cfg.get('behavior_mode')}; server {cfg.get('base_url') or 'NOT SET'}; "
-             f"key {'set' if cfg.get('api_key') else 'NOT SET (plugin settings: api_key)'}; "
+             f"key {('personal (' + str(cfg.get('api_key_email')) + ')') if cfg.get('api_key_source') == 'login' and cfg.get('api_key') else 'shared' if cfg.get('api_key') else 'NOT SET (run /clm:login)'}; "
              f"Jev {'on (behavior checks averaged, unsure tool calls)' if cfg.get('jev_api_key') else 'off'}"]
     try:
         with open(os.path.join(data_dir(), "actions.jsonl"), encoding="utf-8") as f:
@@ -764,12 +847,28 @@ def status() -> str:
 
 
 def cli(args: list[str]) -> int:
-    """--status | --pause | --resume, optionally with --data DIR (the plugin's data dir, from a skill)."""
+    """--status | --pause | --resume | --login [start|finish], optionally with --data DIR (the plugin's data dir)."""
     if "--data" in args:
         i = args.index("--data")
         if i + 1 < len(args) and args[i + 1]:
             os.environ["CLAUDE_PLUGIN_DATA"] = args[i + 1]
         args = args[:i] + args[i + 2:]
+    if args[:1] == ["--login"]:
+        step = args[1] if len(args) > 1 else "both"
+        if step in ("start", "both"):
+            p = login_start()
+            print(f"Open {p['verification_uri']} and approve code {p['user_code']}\n"
+                  f"(sign in with your Metatheory Google account). The code expires in 10 minutes.", flush=True)
+            if step == "both":
+                try:
+                    import webbrowser
+                    webbrowser.open(p["verification_uri"])
+                except Exception:  # noqa: BLE001
+                    pass
+        if step in ("finish", "both"):
+            email = login_finish()
+            print(f"Signed in as {email}. Your personal CLM key is saved in {config_path()}; new sessions use it.")
+        return 0
     flag = os.path.join(data_dir(), "paused")
     if args == ["--pause"]:
         os.makedirs(data_dir(), exist_ok=True)
@@ -784,7 +883,7 @@ def cli(args: list[str]) -> int:
 
 
 def main() -> int:
-    if sys.argv[1:2] in (["--status"], ["--pause"], ["--resume"]):
+    if sys.argv[1:2] in (["--status"], ["--pause"], ["--resume"], ["--login"]):
         return cli(sys.argv[1:])
     if sys.argv[1:] == ["--background"]:
         try:

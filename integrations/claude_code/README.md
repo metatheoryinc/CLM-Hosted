@@ -29,8 +29,10 @@ claude plugin marketplace add metatheoryinc/CLM-Hosted
 claude plugin install clm@clm-hosted
 ```
 
-Claude Code asks for the plugin's settings when it is enabled (or later under `/plugin` →
-`clm` → configure): the **agent key**, stored in your keychain, and three switches:
+Then get your personal key: run `/clm:login` in Claude Code. It shows a link and a short code;
+open the link, sign in with your Metatheory Google account and approve the code, and the key is
+saved for every session (it lasts until you revoke it at `https://clm.metatheory.dev/login`).
+The plugin's settings (under `/plugin` → `clm` → configure) hold three switches and two optional keys:
 
 | setting | default | on | off |
 |---|---|---|---|
@@ -38,6 +40,7 @@ Claude Code asks for the plugin's settings when it is enabled (or later under `/
 | Behavior checks | on | Claude may be asked to verify or fix something when a turn ends | log only |
 | Tool-call gate | off | a confident review/block forces the permission prompt or denies the call | log only |
 | Jev API key | not set | optional TypeSafe key: CLM and Jev together (below) | CLM alone, Opus judge |
+| CLM agent key | not set | only for a key given to you by hand; `/clm:login` is the normal way | |
 
 New sessions use it. In a session:
 

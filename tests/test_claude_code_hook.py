@@ -832,3 +832,87 @@ def test_the_holdout_keeps_the_original_model(run):
     sub = next(r for r in clm.wait(3) if r.get("workflow") == "routing/claude-code-subagents")
     assert sub["meta"]["holdout"] == "sonnet" and sub["acted"] == "holdout" and sub["meta"]["applied_model"] is None
     assert hook.held_out("toolu_h", 0.0) is False
+
+
+# ── /clm:login: device login for a personal key ──────────────────────────────
+
+class FakeAuth:
+    """/v1/auth/device and /v1/auth/token: pending `pending` times, then the key (or `final`)."""
+
+    def __init__(self, pending=1, final=(200, {"api_key": "clm_personal", "email": "jt@metatheory.gg", "key_id": "k"})):
+        self.polls, self.labels = 0, []
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                assert "Authorization" not in self.headers           # the device endpoints need no key
+                if self.path == "/v1/auth/device":
+                    outer.labels.append(body.get("label"))
+                    code, out = 200, {"device_code": "dev-secret", "user_code": "BCDF-GHJK", "expires_in": 600,
+                                      "interval": 0.05, "verification_uri": "https://clm.example/login?code=BCDF-GHJK"}
+                else:
+                    outer.polls += 1
+                    code, out = (428, {"error": "authorization_pending"}) if outer.polls <= pending else final
+                data = json.dumps(out).encode()
+                self.send_response(code); self.send_header("Content-Length", str(len(data))); self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_port}"
+
+
+def login_env(tmp_path, url, extra=None):
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"base_url": url, "mode": "off", "threshold": 0.8, **(extra or {})}))
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLM_", "CLAUDE_PLUGIN"))}
+    env.update(CLM_HOOK_CONFIG=str(cfg), HOME=str(tmp_path))
+    return env, cfg
+
+
+def test_login_start_then_finish_saves_a_personal_key(tmp_path):
+    auth = FakeAuth(pending=2)
+    try:
+        env, cfg = login_env(tmp_path, auth.url)
+        hook_cli = lambda *a: subprocess.run([sys.executable, HOOK, "--login", *a, "--data", str(tmp_path / "d")],  # noqa: E731
+                                             capture_output=True, text=True, env=env, timeout=30)
+        p = hook_cli("start")
+        assert p.returncode == 0 and "BCDF-GHJK" in p.stdout and "https://clm.example/login?code=BCDF-GHJK" in p.stdout
+        assert "claude-code" in auth.labels[0]
+        p = hook_cli("finish")
+        assert p.returncode == 0 and "Signed in as jt@metatheory.gg" in p.stdout and "clm_personal" not in p.stdout
+        saved = json.loads(cfg.read_text())
+        assert (saved["api_key"], saved["api_key_source"], saved["api_key_email"]) == ("clm_personal", "login", "jt@metatheory.gg")
+        assert saved["threshold"] == 0.8 and "mode" not in saved                # other settings kept; off -> default
+        assert oct(os.stat(cfg).st_mode & 0o777) == "0o600" and auth.polls == 3
+        assert not (tmp_path / "d" / "login.json").exists()
+        assert "no CLM login in progress" in hook_cli("finish").stderr            # nothing pending any more
+    finally:
+        auth.srv.shutdown()
+
+
+def test_a_login_key_beats_an_old_plugin_key(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"api_key": "clm_personal", "api_key_source": "login"}))
+    monkeypatch.setenv("CLM_HOOK_CONFIG", str(cfg))
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", "/x")
+    monkeypatch.setenv("CLAUDE_PLUGIN_OPTION_API_KEY", "old-shared")
+    assert hook.load_config()["api_key"] == "clm_personal"
+    cfg.write_text(json.dumps({"api_key": "pasted"}))
+    assert hook.load_config()["api_key"] == "old-shared"                        # without a login, the setting wins
+
+
+def test_an_expired_login_fails_cleanly(tmp_path):
+    auth = FakeAuth(pending=0, final=(410, {"error": "expired_token"}))
+    try:
+        env, cfg = login_env(tmp_path, auth.url)
+        p = subprocess.run([sys.executable, HOOK, "--login", "--data", str(tmp_path / "d")], capture_output=True,
+                           text=True, env={**env, "BROWSER": "true"}, timeout=30)
+        assert p.returncode != 0 and "expired_token" in p.stderr
+        assert "api_key" not in json.loads(cfg.read_text())
+    finally:
+        auth.srv.shutdown()

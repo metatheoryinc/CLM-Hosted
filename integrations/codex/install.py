@@ -13,7 +13,6 @@ run. The agent key goes in ~/.config/clm/claude-code.json (mode 600), shared wit
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import shutil
@@ -136,10 +135,16 @@ def install(args) -> None:
     key = args.key or os.environ.get("CLM_API_KEY") or cfg.get("api_key")
     if not key:
         if not sys.stdin.isatty():
-            raise SystemExit("no agent key: pass --key, set CLM_API_KEY, or run this in a terminal")
-        key = getpass.getpass("CLM agent key (ask whoever runs the CLM stack): ").strip()
+            raise SystemExit("no CLM key: run this in a terminal to sign in with Google, or pass --key")
+        # sign in with Google (device login) and save a personal key in the shared config
+        import subprocess
+        env = {**os.environ, "CLM_HOOK_RUNTIME": "codex"}
+        if subprocess.run([sys.executable, os.path.join(SRC, "clm_hook.py"), "--login"], env=env).returncode != 0:
+            raise SystemExit("CLM login did not finish; run the installer again")
+        cfg = read_json(config_path())
+        key = cfg.get("api_key")
     if not key:
-        raise SystemExit("no agent key given")
+        raise SystemExit("no agent key")
     new = {"base_url": "https://clm.metatheory.dev", **cfg, "api_key": key}
     jev_key = args.jev_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV_API_KEY")
     if jev_key:
@@ -214,7 +219,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = ap.add_subparsers(dest="cmd")
     i = sub.add_parser("install", help="install or update (the default)")
     for p in (ap, i):
-        p.add_argument("--key", help="agent key (default: $CLM_API_KEY, the existing config, or a prompt)")
+        p.add_argument("--key", help="agent key (default: $CLM_API_KEY, the existing config, or sign in with Google)")
         p.add_argument("--shadow", action="store_true", help="behavior checks log only in Codex")
         p.add_argument("--jev-key", help="optional TypeSafe key (default: $TYPESAFE_API_KEY): CLM + Jev behavior checks")
     u = sub.add_parser("uninstall", help="remove the hooks and the copied hook files")

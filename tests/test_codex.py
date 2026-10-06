@@ -119,7 +119,7 @@ def test_uninstall_leaves_other_hooks(tmp_path):
 
 def test_no_key_fails_cleanly(tmp_path):
     p = run_install(tmp_path)
-    assert p.returncode != 0 and "no agent key" in p.stderr
+    assert p.returncode != 0 and "no CLM key" in p.stderr
 
 
 
