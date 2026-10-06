@@ -10,7 +10,7 @@ config:
   clm-hosted:registryAuthId: cmuddk8gr003psxunmobd4qxd
   clm-hosted:cloudflareAccountId: daa733811c7150ec3148993b991a2400
   clm-hosted:cloudflareZoneId: f8a3822c528b323b90dc68789244791e
-  clm-hosted:imageTag: 1c5f53a988c66ada9d0c568bfdee6b219727394f
+  clm-hosted:imageTag: 07757b643953ebfd0bd4c2bf1c0e57c030cf8ebb
   clm-hosted:adminAgents:
     - admin
     - jt@metatheory.gg
