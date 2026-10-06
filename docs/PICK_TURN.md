@@ -241,7 +241,10 @@ prices, or interchangeable absolute capacities. This policy compares
 relative headroom only. It cannot predict how much a turn will consume or
 guarantee the final utilization stays below 90%. The optional reserve is
 a static buffer, not a learned consumption forecast. Shared accounts can
-change between observation and execution; refresh after each turn.
+change between observation and execution. Use the saved snapshot without
+waiting for a quota read, and refresh Codex in the background after every
+chat turn, including Claude turns. This deliberately accepts imperfect
+quota freshness to avoid adding about a second before each turn.
 
 Configuration (CLM-owned, not caller-provided policy knobs):
 
@@ -293,9 +296,17 @@ Audit budgets are explicitly authorized for the shared collector; local
 provider budget snapshots must stay out of mipmap's git history and memory
 log. Persist them in a private ignored data-dir file (atomic write, mode
 0600), including observation time and subscription/model scope. On restart,
-refresh Codex before picking; stale Claude state stays unknown until a new
-`rate_limit_event`. Claude has no separately authorized budget-fetch spike
-in this phase.
+use the saved snapshot immediately; an optional startup Codex refresh runs
+in the background without delaying selection. After every completed turn,
+including a Claude turn, refresh Codex limits asynchronously. If another
+turn starts first, use the prior snapshot; selection never waits for the
+meter. Bound each read separately from the CLM RPC, coalesce overlapping
+refresh requests, and reject older responses that would overwrite newer
+state. A failed read must not advance the last successful observation time.
+Stale/expired budgets follow the unknown-budget policy. Claude updates its
+snapshot from `rate_limit_event`; stale Claude state stays unknown until a
+new event. Claude has no separately authorized budget-fetch spike in this
+phase.
 
 Mipmap displays one selection line per turn, writes the pick to its activity
 pane, and appends provider/model/effort/tier/why/fallback to `usage.jsonl`.
@@ -334,8 +345,10 @@ bounded logging, late RPC replies, and unchanged `clm_pick_model` behavior.
 Verify MCP/library/HTTP parity if HTTP is implemented.
 
 Mipmap tests must cover sticky exact slash commands, provider/model changes
-between turns, restart budget persistence excluded from git/log, legacy
-usage summaries, and prompt/cache preservation. Failure to choose an agent
+between turns, restart budget persistence excluded from git/log, selection
+that never waits for an in-flight meter, refresh after either provider's
+turn, failed-read observation times, refresh coalescing and response ordering,
+legacy usage summaries, and prompt/cache preservation. Failure to choose an agent
 may use the default before execution. Never automatically replay a turn
 after the chosen agent has already emitted output or run tools: it could
 repeat side effects; report that execution failure instead.
@@ -351,9 +364,10 @@ any measured/notional costs. No push, merge, or infrastructure apply.
 
 See [CODEX_RATE_LIMIT_SPIKE.md](CODEX_RATE_LIMIT_SPIKE.md) for observed wire
 shapes, nullable fields, evidence limits, two-run usage totals, and timing.
-Use a read-only app-server sidecar alongside ephemeral exec. Preflight
-metadata reads take roughly one second and have a separate bounded timeout
-from the CLM RPC; reads after turns can run asynchronously. This account
+Use a read-only app-server sidecar alongside ephemeral exec. Metadata reads
+take roughly one second, so the agreed policy runs them in the background
+after every turn and selects from saved state without a blocking read.
+Their bounded timeout is separate from the CLM RPC. This account
 exposes a shared `codex` weekly bucket, not separate model prices or quotas.
 Normalize all applicable windows and preserve bucket identity. Backend
 permission explicitly denying ordinary usage removes those candidates
@@ -371,7 +385,8 @@ and the effective filtered default is the first candidate; exhaustion
 returns a visible default fallback; only one automatic tier drop is permitted; explicit
 model/provider settings constrain fallback and prevent manual tier drops;
 optional Jev can only increase capability; snapshots expire after ten
-minutes; and the 90% guard is a routing heuristic with a
+minutes; background refresh after either provider's turn replaces a blocking
+quota preflight; and the 90% guard is a routing heuristic with a
 configurable reserve rather than a guaranteed consumption cap.
 
 The shared module plus MCP and an HTTP adapter is recommended so company

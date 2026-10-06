@@ -22,14 +22,23 @@ The local schema says `excludeResetCreditDetails` skips a separate reset
 credit detail lookup. Do not enable `supportsLunaReserve`: it can record
 experiment exposure and is unrelated to this ordinary budget meter.
 
-Read before selection and after completed turns, carrying the receipt time
-as `observed_at`. The preflight metadata read has its own bounded timeout
+Agreed collection policy after review: select immediately from the latest
+persisted snapshot, without a quota read before the turn. Refresh Codex
+limits in the background after every completed chat turn, including Claude
+turns, carrying the receipt time as `observed_at`. Reading after Claude
+turns prevents an old Codex snapshot from persisting merely because routing
+switched providers. Each metadata read has its own bounded timeout
 (proposed two seconds), separate from the roughly two-second CLM RPC timeout.
-Post-turn reads can run asynchronously. Failed reads preserve an explicitly
-stale snapshot; expired snapshots become unknown. They do not select a
-model locally or bypass CLM. A next-turn preflight must not be overwritten
-by an older asynchronous response; order snapshots by read generation and
-observation time.
+
+If the next turn starts while a refresh is running, use the prior snapshot
+without waiting. Failed reads retain the last successful snapshot and its
+original observation time; expired/stale snapshots become unknown. Reads
+do not select a model locally or bypass CLM. Coalesce refresh requests while
+a read is in flight and prevent an older response from replacing a newer
+snapshot. On restart, load the saved state immediately; a startup refresh
+may run in the background but must not delay the first turn. Accept that
+other apps can consume quota between observations: this is a routing
+heuristic, not a capacity reservation.
 
 The [official app-server documentation](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt)
 describes this read, its multi-bucket view, window durations, and reset
