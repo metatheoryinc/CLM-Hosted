@@ -47,7 +47,8 @@ installer registers an MCP server, `clm`, with one tool the main agent calls its
 `clm_pick_model(task)`. CLM's trained subagent-tier head reads the task and returns a Codex model and
 reasoning effort. An unsure lookup goes up to the middle tier, so a cheap main chat hands work to a
 stronger model rather than a weaker one; the top tier, the most expensive, needs CLM to be sure
-(p >= 0.95, `pick_top_threshold`), and a less certain top-tier lean gets the middle tier. Add this to your `AGENTS.md`:
+(p >= 0.8, `pick_top_threshold`; Fable's labels of 118 Codex picks put the best balance there), and a
+less certain top-tier lean gets the middle tier. Add this to your `AGENTS.md`:
 
 ```markdown
 Before you call spawn_agent, call the clm_pick_model tool with the task exactly as you will give it

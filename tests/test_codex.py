@@ -167,7 +167,8 @@ def test_the_server_speaks_mcp(tmp_path):
     ({"haiku": 0.30, "sonnet": 0.60, "opus": 0.10}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # unsure middle stays
     ({"haiku": 0.60, "sonnet": 0.30, "opus": 0.10}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # unsure lookup: up
     ({"haiku": 0.01, "sonnet": 0.02, "opus": 0.97}, LONG_TASK, "opus", "gpt-5.6-sol"),         # sure: the top tier
-    ({"haiku": 0.02, "sonnet": 0.08, "opus": 0.90}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # top needs >= 0.95
+    ({"haiku": 0.02, "sonnet": 0.08, "opus": 0.90}, LONG_TASK, "opus", "gpt-5.6-sol"),         # top tier from 0.8
+    ({"haiku": 0.05, "sonnet": 0.25, "opus": 0.70}, LONG_TASK, "sonnet", "gpt-5.6-terra"),     # below 0.8: middle
     ({"haiku": 0.97, "sonnet": 0.02, "opus": 0.01}, "count the files", "sonnet", "gpt-5.6-terra"),  # too short for haiku
     ({"haiku": 0.97, "sonnet": 0.02, "opus": 0.01}, LONG_TASK, "haiku", "gpt-5.6-luna"),
 ])

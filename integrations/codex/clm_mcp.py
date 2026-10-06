@@ -6,7 +6,7 @@ describes the task to this tool instead (AGENTS.md tells it to, before `spawn_ag
 subagent-tier head answers haiku / sonnet / opus; each tier maps to a Codex model and reasoning
 effort (``codex.pick_models`` in ~/.config/clm/claude-code.json). The main chat runs on a small
 model and hands work up: an unsure lookup goes to the middle tier, while the top tier needs CLM to be
-sure (``pick_top_threshold``, 0.95), since it costs the most. Every pick is logged as
+sure (``pick_top_threshold``, 0.8: Fable's labels of 118 picks put it there), since it costs the most. Every pick is logged as
 ``routing/codex-model-picks``. Standard library only; installed by integrations/codex/install.py.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ TOOL = {
 def pick(cfg: dict, task: str, task_name: str = "") -> dict:
     models = {**DEFAULT_MODELS, **(cfg.get("pick_models") or {})}
     threshold = float(cfg.get("pick_threshold", 0.8))
-    top = float(cfg.get("pick_top_threshold", 0.95))
+    top = float(cfg.get("pick_top_threshold", 0.8))
     state = H.subagent_state({"tool_input": {"description": task_name, "prompt": task, "subagent_type": "general-purpose"}})
     clm = H.classify_subagent(cfg, state, float(cfg.get("subagent_timeout", 1.5)) * 2)
     if "error" in clm:
