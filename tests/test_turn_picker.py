@@ -2,10 +2,12 @@
 import importlib.util
 import math
 import os
+import threading
 import time
 
 import pytest
 
+import clm.turn_picker as turn_picker_module
 from clm.turn_picker import (
     AuditQueue,
     SUBAGENT_INSTRUCTIONS,
@@ -211,6 +213,16 @@ def test_exactly_one_automatic_tier_drop_and_never_an_upgrade():
     assert got["tier"] == "haiku" and got["fallback"] is True
 
 
+@pytest.mark.parametrize("lower, phrase", [
+    (candidate("claude", "sonnet", ...), "capacity is unknown"),
+    (candidate("claude", "sonnet", 95, reset=NOW + 60), "reset grace"),
+])
+def test_tier_drop_still_explains_the_selected_budget_state(lower, phrase):
+    c = classifier(result("opus", 0.9, {"haiku": 0.05, "sonnet": 0.05, "opus": 0.9}))
+    got = pick_turn(request(candidate("codex", "opus", 95), lower), c, now=lambda: NOW)
+    assert got["tier"] == "sonnet" and "one tier" in got["why"] and phrase in got["why"]
+
+
 @pytest.mark.parametrize("bad", [
     {},
     {"task": " ", "caller": "x", "candidates": [{}]},
@@ -260,7 +272,7 @@ def test_classification_failure_returns_exact_first_candidate_without_leaking_er
     {"turn_pick_threshold": 0}, {"turn_pick_top_threshold": 1.1},
     {"turn_pick_min_task_chars": -1}, {"turn_pick_budget_ceiling_percent": math.inf},
     {"turn_pick_budget_reserve_percent": -1}, {"turn_pick_reset_grace_minutes": -1},
-    {"turn_pick_budget_max_age_seconds": 0}, {"turn_pick_timeout_seconds": 0},
+    {"turn_pick_budget_max_age_seconds": 0}, {"turn_pick_timeout_seconds": 0}, [], 0, "",
 ])
 def test_bad_policy_config_falls_back_to_exact_first_candidate(config):
     first = candidate("codex", model="default")
@@ -297,6 +309,9 @@ def test_audit_contains_replay_data_is_redacted_and_sink_failure_does_not_change
     req = request(candidate("codex", used=12), candidate("claude", "opus", 30),
                   task="password=hunter2hunter2 " + LONG_TASK)
     got = pick_turn(req, c, now=lambda: NOW, sink=records.append)
+    deadline = time.time() + 1
+    while not records and time.time() < deadline:
+        time.sleep(0.01)
     rec = records[0]
     assert rec["workflow"] == "routing/turn-picks" and rec["meta"]["policy_version"] == "turn-picks-v1"
     assert rec["meta"]["candidates"][0]["budget"]["windows"][0]["used_percent"] == 12
@@ -318,7 +333,28 @@ def test_audit_sanitizes_candidate_and_classifier_metadata():
     req["caller"] = "token=abcdefghijklmnop"
     got = pick_turn(req, classifier(answer), now=lambda: NOW, sink=records.append)
     assert got["model"] == "api_key=hunter2hunter2"  # executable identity remains exact for the caller
+    deadline = time.time() + 1
+    while not records and time.time() < deadline:
+        time.sleep(0.01)
     assert "hunter2" not in repr(records[0]) and "abcdefghijklmnop" not in repr(records[0])
+
+
+def test_plain_callback_sink_is_bounded_and_never_delays_the_library_result():
+    entered, release = threading.Event(), threading.Event()
+    def slow_sink(_record):
+        entered.set()
+        release.wait(1)
+    c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
+    req = request(candidate("codex", used=10))
+    started = time.monotonic()
+    got = pick_turn(req, c, now=lambda: NOW, sink=slow_sink)
+    elapsed = time.monotonic() - started
+    assert got["tier"] == "sonnet" and elapsed < 0.1 and entered.wait(1)
+    started = time.monotonic()
+    for _ in range(100):
+        pick_turn({**req, "requested_tier": "sonnet"}, c, now=lambda: NOW, sink=slow_sink)
+    assert time.monotonic() - started < 0.2 and turn_picker_module._CALLBACK_AUDIT.dropped > 0
+    release.set()
 
 
 def test_bounded_audit_queue_never_blocks_and_flush_is_bounded():
@@ -333,3 +369,17 @@ def test_bounded_audit_queue_never_blocks_and_flush_is_bounded():
     queue.close(timeout=0.02)
     assert time.monotonic() - started < 0.15
     assert queue.dropped > 0 and queue._thread.daemon is True
+
+
+def test_audit_queue_worker_exits_after_a_full_queue_is_closed():
+    entered, release = threading.Event(), threading.Event()
+    def blocked(_record):
+        entered.set()
+        release.wait(1)
+    queue = AuditQueue(blocked, maxsize=1)
+    assert queue.submit({"i": 1}) and entered.wait(1)
+    assert queue.submit({"i": 2})  # the sentinel cannot fit when close first runs
+    queue.close(timeout=0.01)
+    release.set()
+    queue._thread.join(1)
+    assert not queue._thread.is_alive()

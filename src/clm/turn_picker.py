@@ -6,6 +6,7 @@ adapters supply a classifier which accepts ``(state, timeout_seconds)``.
 """
 from __future__ import annotations
 
+import atexit
 import datetime
 import json
 import math
@@ -114,6 +115,8 @@ class AuditQueue:
                 pass
             finally:
                 self._queue.task_done()
+            if self._closed and self._queue.empty():
+                return
 
     def close(self, timeout=0.2):
         self._closed = True
@@ -122,6 +125,35 @@ class AuditQueue:
         except queue.Full:
             pass
         self._thread.join(max(0.0, float(timeout)))
+
+
+_CALLBACK_AUDIT = None
+_CALLBACK_AUDIT_LOCK = threading.Lock()
+
+
+def _callback_audit():
+    global _CALLBACK_AUDIT
+    with _CALLBACK_AUDIT_LOCK:
+        if _CALLBACK_AUDIT is None:
+            _CALLBACK_AUDIT = AuditQueue(lambda item: item[0](item[1]), maxsize=64)
+    return _CALLBACK_AUDIT
+
+
+def _dispatch_audit(sink, record):
+    """Enqueue arbitrary callbacks; avoid a second queue for our own queue submit method."""
+    owner = getattr(sink, "__self__", None)
+    if isinstance(owner, AuditQueue) and getattr(sink, "__func__", None) is AuditQueue.submit:
+        sink(record)
+    else:
+        _callback_audit().submit((sink, record))
+
+
+def _close_callback_audit():
+    if _CALLBACK_AUDIT is not None:
+        _CALLBACK_AUDIT.close(timeout=0.2)
+
+
+atexit.register(_close_callback_audit)
 
 
 def _number(value, name, allow_none=False):
@@ -134,7 +166,9 @@ def _number(value, name, allow_none=False):
 
 def _config(values):
     cfg = dict(DEFAULT_CONFIG)
-    if values:
+    if values is not None and not isinstance(values, dict):
+        raise ValueError("turn picker config must be an object")
+    if values is not None:
         cfg.update(values)
     for key in ("turn_pick_threshold", "turn_pick_top_threshold"):
         cfg[key] = _number(cfg[key], key)
@@ -438,8 +472,9 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
     """Select one supplied candidate using capability first, then budget.
 
     ``classifier`` and ``jev_classifier`` receive ``(state, timeout_seconds)``.
-    ``sink`` receives a sanitized replay record; adapters should pass
-    :meth:`AuditQueue.submit` so upload latency stays off the selection path.
+    ``sink`` receives a sanitized replay record. Arbitrary callbacks are sent
+    through one process-wide bounded daemon queue; :meth:`AuditQueue.submit`
+    is recognized as an already-asynchronous sink and enqueued directly.
     Invalid requests raise :class:`ValueError`; policy, configuration, and
     classifier failures return the exact first candidate with ``fallback``.
     """
@@ -488,19 +523,17 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
             selected, assessment, considered = _choose(validated["candidates"], capability_tier,
                                                         validated["prefer"], cfg, evaluated_at)
             assessments.extend(considered)
-            dropped = False
             if selected is None and not validated["requested_tier"] and TIER_RANK[capability_tier] > 0:
                 lower = TIERS[TIER_RANK[capability_tier] - 1]
                 selected, assessment, considered = _choose(validated["candidates"], lower,
                                                             validated["prefer"], cfg, evaluated_at)
                 assessments.extend(considered)
                 if selected is not None:
-                    dropped = True
                     why += "; no eligible %s capacity, so dropped exactly one tier to %s" % (capability_tier, lower)
             if selected is None:
                 selected, fallback, acted = default, True, "baseline"
                 why += "; no eligible capacity, using the caller default"
-            elif not dropped:
+            else:
                 excluded = any(not a["eligible"] for _, a in considered)
                 eligible = [(c, a) for c, a in considered if a["eligible"]]
                 if assessment["group"] == "unknown":
@@ -527,8 +560,9 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
     if sink is not None:
         try:
             record_cfg = cfg if cfg is not None else dict(DEFAULT_CONFIG)
-            sink(_audit(validated, record_cfg, state, clm, jev, capability_tier, selected, why, fallback,
-                        evaluated_at, assessments, acted))
+            record = _audit(validated, record_cfg, state, clm, jev, capability_tier, selected, why, fallback,
+                            evaluated_at, assessments, acted)
+            _dispatch_audit(sink, record)
         except Exception:
             pass
     return response
