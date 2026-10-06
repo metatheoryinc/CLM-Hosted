@@ -129,9 +129,12 @@ Setup, once:
 
 1. **Pulumi Cloud trusts GitHub.** Pulumi Cloud → `metatheory` → Settings → OIDC Issuers →
    Register issuer `https://token.actions.githubusercontent.com`; add an authorization policy
-   granting an **organization** token when `sub` is `repo:metatheoryinc/CLM-Hosted:ref:refs/heads/main`
-   (the plan job) or `repo:metatheoryinc/CLM-Hosted:environment:prod` (the deploy job). No
-   long-lived token is stored in GitHub.
+   granting an **organization** token when `sub` is
+   `repo:metatheoryinc@90162879/CLM-Hosted@1386146707:ref:refs/heads/main` (the plan job) or
+   `repo:metatheoryinc@90162879/CLM-Hosted@1386146707:environment:prod` (the deploy job). The repo
+   uses GitHub's immutable subject (owner and repo ids in the claim; check with
+   `gh api repos/metatheoryinc/CLM-Hosted/actions/oidc/customization/sub`). No long-lived token
+   is stored in GitHub.
 2. **The `prod` environment.** GitHub → Settings → Environments → New environment `prod`:
    required reviewers (you), deployment branches limited to `main`.
 
