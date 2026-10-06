@@ -1,0 +1,175 @@
+# Deploy the stack (infra/Pulumi.yaml) to prod, with your approval.
+#
+# The Pod is updated only when something material in the container changed: imageTag moves to
+# the newest successfully built image only if Dockerfile, .dockerignore, pyproject.toml, src/ or
+# deploy/entrypoint.sh differ from the deployed commit. Docs, tests, the plugin or evaluation
+# changes build images that are never deployed. Gateway and Access changes (infra/) deploy
+# without touching the Pod; Pulumi updates only what changed.
+#
+#   plan    newest image vs deployed, pulumi preview, summary on the run page (no approval)
+#   deploy  waits for approval in the `prod` environment, pulumi up, records imageTag on main,
+#           waits for /health
+#
+# One-time setup (infra/README.md → Deploys): Pulumi Cloud trusts this repo's GitHub OIDC
+# tokens for the `metatheory` organization, and the `prod` environment has required reviewers.
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [image]
+    types: [completed]
+    branches: [main]
+  push:
+    branches: [main]
+    paths: [infra/**, .github/workflows/deploy.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  STACK: metatheory/prod
+  IMAGE: ghcr.io/metatheoryinc/clm-hosted
+  # what goes into the container and changes how it runs (README.md and LICENSE are only metadata)
+  MATERIAL: Dockerfile .dockerignore pyproject.toml src deploy/entrypoint.sh
+
+jobs:
+  plan:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+      id-token: write
+    outputs:
+      changes: ${{ steps.preview.outputs.changes }}
+      image_changed: ${{ steps.image.outputs.changed }}
+      image_tag: ${{ steps.image.outputs.tag }}
+      ref: ${{ steps.image.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Decide the image
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          deployed=$(awk '/clm-hosted:imageTag:/ {print $2}' infra/Pulumi.prod.yaml | tr -d '"')
+          latest=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow image.yml --branch main --status success \
+                     --limit 1 --json headSha --jq '.[0].headSha // ""')
+          changed=false
+          files=""
+          if [ -n "$latest" ] && [ "$latest" != "$deployed" ]; then
+            if ! git cat-file -e "$deployed^{commit}" 2>/dev/null; then
+              changed=true; files="(the deployed commit $deployed is not in this repo's history)"
+            elif ! git diff --quiet "$deployed" "$latest" -- $MATERIAL; then
+              changed=true; files=$(git diff --stat "$deployed" "$latest" -- $MATERIAL | tail -n 30)
+            fi
+          fi
+          tag=$([ "$changed" = true ] && echo "$latest" || echo "$deployed")
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Deploy plan"
+            echo
+            echo "- deployed image: \`$deployed\`"
+            echo "- newest built image: \`${latest:-none}\`"
+            if [ "$changed" = true ]; then
+              echo "- **container changed: the Pod moves to \`$tag\` (it restarts; the model reloads)**"
+              echo; echo '```'; echo "$files"; echo '```'
+            else
+              echo "- container unchanged: the Pod keeps \`$deployed\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the image exists
+        if: steps.image.outputs.changed == 'true'
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker manifest inspect "$IMAGE:${{ steps.image.outputs.tag }}" > /dev/null
+
+      - uses: pulumi/auth-actions@v2
+        with:
+          organization: metatheory
+          requested-token-type: urn:pulumi:token-type:access_token:organization
+
+      - uses: pulumi/actions@v7      # no command: installs the Pulumi CLI
+
+      - name: Preview
+        id: preview
+        working-directory: infra
+        run: |
+          if [ "${{ steps.image.outputs.changed }}" = true ]; then
+            pulumi config set imageTag "${{ steps.image.outputs.tag }}" --stack "$STACK"
+          fi
+          pulumi preview --stack "$STACK" --json > preview.json
+          changes=$(jq '[.changeSummary // {} | to_entries[] | select(.key != "same") | .value] | add // 0' preview.json)
+          replaced=$(jq -r '[.steps[]? | select(.op == "replace" or .op == "create-replacement" or .op == "delete-replaced") | .urn] | unique | .[]' preview.json)
+          echo "changes=$([ "$changes" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "### pulumi preview: $changes resource change(s)"
+            jq -r '.steps[]? | select(.op != "same") | "- \(.op): `\(.urn | split("::") | .[-1])`"' preview.json
+            if [ -n "$replaced" ]; then
+              echo; echo "> **Warning: replaces resources** (a replaced Pod re-downloads the weights):"
+              echo "$replaced" | sed 's/^/> - /'
+            fi
+            [ "$changes" -gt 0 ] || echo "Nothing to deploy."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: plan
+    if: needs.plan.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    environment: prod       # required reviewers: nothing changes until approved
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.ref }}    # exactly what the plan previewed
+          fetch-depth: 0
+
+      - uses: pulumi/auth-actions@v2
+        with:
+          organization: metatheory
+          requested-token-type: urn:pulumi:token-type:access_token:organization
+
+      - uses: pulumi/actions@v7
+
+      - name: pulumi up
+        working-directory: infra
+        run: |
+          if [ "${{ needs.plan.outputs.image_changed }}" = true ]; then
+            pulumi config set imageTag "${{ needs.plan.outputs.image_tag }}" --stack "$STACK"
+          fi
+          pulumi up --yes --stack "$STACK" --diff
+
+      - name: Record the deployed image on main
+        if: needs.plan.outputs.image_changed == 'true'
+        run: |
+          tag="${{ needs.plan.outputs.image_tag }}"
+          git fetch origin main
+          git checkout -B main origin/main
+          sed -i -E "s/^(  clm-hosted:imageTag: ).*/\1$tag/" infra/Pulumi.prod.yaml
+          git diff --quiet && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy: imageTag ${tag:0:7} [skip ci]"
+          git push origin main
+
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS https://clm.metatheory.dev/health | grep -q '"ok":true'; then echo "healthy"; exit 0; fi
+            sleep 15
+          done
+          echo "CLM is not healthy after 15 minutes" >&2
+          exit 1

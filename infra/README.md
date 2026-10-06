@@ -112,6 +112,32 @@ any request whose response takes over 100 s, so send large best-of-N sets in
 several calls. The gateway logs each request's agent, path,
 status and latency to Workers Logs.
 
+## Deploys (GitHub Actions)
+
+`.github/workflows/deploy.yml` deploys `prod` after every successful image build and every push
+that changes `infra/`, and on demand (Actions → deploy → Run workflow). It moves the Pod to a new
+image **only when something material in the container changed** (`Dockerfile`, `.dockerignore`,
+`pyproject.toml`, `src/`, `deploy/entrypoint.sh`) since the deployed commit; docs, tests and plugin
+changes never restart the Pod. Gateway and Access changes deploy without touching it.
+
+The `plan` job writes the decision and the `pulumi preview` to the run's summary, warning if
+anything would be replaced; when nothing would change it stops. The `deploy` job waits for an
+approval in the `prod` environment, runs `pulumi up` for exactly the previewed commit, commits the
+new `imageTag` to `main` (`[skip ci]`), and waits for `/health`.
+
+Setup, once:
+
+1. **Pulumi Cloud trusts GitHub.** Pulumi Cloud → `metatheory` → Settings → OIDC Issuers →
+   Register issuer `https://token.actions.githubusercontent.com`; add an authorization policy
+   granting an **organization** token when `sub` is `repo:metatheoryinc/CLM-Hosted:ref:refs/heads/main`
+   (the plan job) or `repo:metatheoryinc/CLM-Hosted:environment:prod` (the deploy job). No
+   long-lived token is stored in GitHub.
+2. **The `prod` environment.** GitHub → Settings → Environments → New environment `prod`:
+   required reviewers (you), deployment branches limited to `main`.
+
+Running `pulumi up` locally still works (the stack is in Pulumi Cloud), but pull first: the
+workflow commits `imageTag` bumps to `main`, and an older checkout would roll the image back.
+
 ## Personal keys (Google sign-in)
 
 People get their own key by signing in at `https://<hostname>/login` with a Google Workspace

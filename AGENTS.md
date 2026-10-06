@@ -41,9 +41,10 @@ CI runs the same (`.github/workflows/tests.yml`); the image only builds when tes
   at `/login` through Cloudflare Access); the gateway stores only their hashes. Static agent keys live in Pulumi config (`agentKeys`) and in
   `~/.config/clm/claude-code.json` (mode 600). Everyone uses the `default` agent key; the `admin`
   key is only for `/v1/admin/*` (`clm-heads upload`). Read keys into env vars, never echo them.
-- **Don't run `pulumi up`.** The maintainer runs it; propose the change and say what it will do.
-  Deploying a new image = CI pushes `ghcr.io/metatheoryinc/clm-hosted:<sha>`, then `imageTag` in
-  `infra/Pulumi.yaml` is bumped and the maintainer runs `pulumi up`.
+- **Don't run `pulumi up`.** Deploys go through `.github/workflows/deploy.yml`: after a push to
+  `main` it previews, the maintainer approves in the `prod` environment, and it deploys. The Pod
+  only moves to a new image when container files (`Dockerfile`, `src/`, `deploy/`, `pyproject.toml`)
+  changed. Don't bump `imageTag` by hand; the workflow records it.
 - **Commit straight to main** and push; no feature branches for this repo.
 - **Trained heads depend on exact text.** Don't change `SUBAGENT_INSTRUCTIONS` / `SUBAGENT_OPTIONS`
   or `INSTRUCTIONS` / `OPTIONS` in `clm_hook.py`, `clm_behaviors.INSTRUCTIONS` / `OPTIONS` /
