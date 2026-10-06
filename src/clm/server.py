@@ -112,6 +112,28 @@ def turn_pick_config_from_env(environ=None) -> dict:
     return out
 
 
+def turn_pick_audit_sink_from_env(environ=None, opener=None):
+    """Build the optional service collector sink from an exact URL and key pair."""
+    env = os.environ if environ is None else environ
+    url, key = env.get("CLM_TURN_PICK_AUDIT_URL"), env.get("CLM_TURN_PICK_AUDIT_KEY")
+    if bool(url) != bool(key):
+        raise ValueError("CLM_TURN_PICK_AUDIT_URL and CLM_TURN_PICK_AUDIT_KEY must both be set")
+    if not url:
+        return None
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        raise ValueError("CLM_TURN_PICK_AUDIT_URL must be an http(s) URL")
+    open_url = opener or urllib.request.urlopen
+
+    def upload(record):
+        request = urllib.request.Request(url, data=json.dumps(record).encode(), method="POST",
+                                         headers={"Content-Type": "application/json", "User-Agent": "clm-serve/1",
+                                                  "Authorization": "Bearer " + key})
+        with open_url(request, timeout=0.25) as response:
+            response.read(1024)
+
+    return upload
+
+
 def _remote_jev_classifier(settings):
     key = settings.get("turn_pick_jev_api_key")
     if not key:
@@ -136,7 +158,7 @@ def _remote_jev_classifier(settings):
 
 def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors: bool = False,
                turn_pick_config: dict | None = None, turn_pick_sink=None, turn_pick_clock=None,
-               turn_pick_jev_classifier=None) -> FastAPI:
+               turn_pick_jev_classifier=None, turn_pick_environ=None, turn_pick_audit_opener=None) -> FastAPI:
     """The API, plus the playground at ``/`` unless ``ui=False``.
 
     ``cors=True`` allows browser requests from any origin (and exposes the
@@ -144,8 +166,10 @@ def create_app(engine: Engine, api_key: str | None = None, ui: bool = True, cors
     is off by default: an API key travels in a header the browser would then
     be free to send from any page.
     """
-    turn_settings = turn_pick_config_from_env()
+    turn_settings = turn_pick_config_from_env(turn_pick_environ)
     turn_settings.update(turn_pick_config or {})
+    if turn_pick_sink is None:
+        turn_pick_sink = turn_pick_audit_sink_from_env(turn_pick_environ, turn_pick_audit_opener)
     turn_audit = turn_picker.AuditQueue(turn_pick_sink, maxsize=64) if turn_pick_sink is not None else None
     clock = turn_pick_clock or time.time
     jev_classifier = turn_pick_jev_classifier

@@ -502,14 +502,22 @@ def pick_turn(request, classifier, *, config=None, now=None, jev_classifier=None
                 why += "; no eligible capacity, using the caller default"
             elif not dropped:
                 excluded = any(not a["eligible"] for _, a in considered)
+                eligible = [(c, a) for c, a in considered if a["eligible"]]
                 if assessment["group"] == "unknown":
                     why += "; selected capacity is unknown"
                 elif assessment["group"] == "grace":
                     why += "; selected by the reset grace rule"
-                elif excluded:
+                if excluded:
                     why += "; other candidates were excluded by the budget guard"
-                elif len([a for _, a in considered if a["eligible"]]) > 1:
-                    why += "; selected the greater measured budget headroom, with preference and order breaking ties"
+                peers = [(c, a) for c, a in eligible if a["group"] == assessment["group"]]
+                if len(peers) > 1:
+                    scores = {a["headroom"] for _, a in peers}
+                    if len(scores) == 1:
+                        why += "; provider preference and candidate order broke the capacity tie"
+                    else:
+                        why += "; selected the greater measured budget headroom"
+                elif len(eligible) > 1:
+                    why += "; measured capacity ranked ahead of unknown or reset-grace capacity"
     if cfg is not None:
         assessments = [(candidate, _evaluate(candidate, cfg, evaluated_at))
                        for candidate in validated["candidates"]]

@@ -2,6 +2,7 @@
 import math
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from clm.server import create_app
@@ -53,7 +54,8 @@ def request():
 
 def client(engine=None, **kwargs):
     return TestClient(create_app(engine or FakeEngine(), api_key="k", ui=False,
-                                 turn_pick_config=kwargs.pop("config", {}), turn_pick_clock=lambda: NOW, **kwargs))
+                                 turn_pick_config=kwargs.pop("config", {}), turn_pick_clock=lambda: NOW,
+                                 turn_pick_environ=kwargs.pop("environ", {}), **kwargs))
 
 
 def test_pick_turn_requires_auth_and_validates_requests():
@@ -128,6 +130,34 @@ def test_server_audit_is_bounded_asynchronous_and_sanitized():
     while not records and time.time() < deadline:
         time.sleep(0.01)
     assert records[0]["workflow"] == "routing/turn-picks" and "hunter2" not in repr(records[0])
+
+
+def test_service_owned_collector_configuration_uploads_with_a_short_timeout():
+    uploads = []
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return False
+        def read(self, _limit):
+            return b"{}"
+    def opener(req, timeout):
+        uploads.append((req, timeout))
+        return Response()
+    env = {"CLM_TURN_PICK_AUDIT_URL": "https://collector.invalid/v1/decisions",
+           "CLM_TURN_PICK_AUDIT_KEY": "collector-key"}
+    with client(environ=env, turn_pick_audit_opener=opener) as c:
+        got = c.post("/v1/pick-turn", json=request(), headers={"Authorization": "Bearer k"}).json()
+        deadline = time.time() + 1
+        while not uploads and time.time() < deadline:
+            time.sleep(0.01)
+    assert got["fallback"] is False and len(uploads) == 1
+    req, timeout = uploads[0]
+    assert req.full_url == env["CLM_TURN_PICK_AUDIT_URL"] and timeout == 0.25
+    assert req.get_header("Authorization") == "Bearer collector-key"
+    assert b'"workflow": "routing/turn-picks"' in req.data
+    with pytest.raises(ValueError, match="both be set"):
+        create_app(FakeEngine(), ui=False, turn_pick_environ={"CLM_TURN_PICK_AUDIT_URL": "https://x"})
 
 
 def test_manual_request_never_calls_the_engine():

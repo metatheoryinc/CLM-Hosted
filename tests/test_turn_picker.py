@@ -189,7 +189,8 @@ def test_unknown_outranks_grace_and_known_blocking_is_not_erased_by_unknown():
 def test_preference_only_breaks_ties_and_order_breaks_remaining_ties():
     c = classifier(result("sonnet", 0.9, {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}))
     codex, claude = candidate("codex", used=40), candidate("claude", used=40)
-    assert pick_turn(request(codex, claude, prefer="claude"), c, now=lambda: NOW)["provider"] == "claude"
+    tied = pick_turn(request(codex, claude, prefer="claude"), c, now=lambda: NOW)
+    assert tied["provider"] == "claude" and "tie" in tied["why"] and "greater" not in tied["why"]
     assert pick_turn(request(codex, claude), c, now=lambda: NOW)["provider"] == "codex"
     # Preference cannot beat greater measured headroom.
     assert pick_turn(request(candidate("codex", used=40), candidate("claude", used=41), prefer="claude"),
