@@ -23,6 +23,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SRC = os.path.join(REPO, "integrations", "claude_code")
 MCP_SRC = os.path.join(REPO, "integrations", "codex", "clm_mcp.py")
+TURN_PICKER_SRC = os.path.join(REPO, "src", "clm", "turn_picker.py")
 AGENTS_SNIPPET = """Before you call spawn_agent, call the clm_pick_model tool with the task exactly as you will give it
 to the subagent, and pass the model and reasoning_effort it returns to spawn_agent."""
 FILES = ("clm_hook.py", "clm_behaviors.py", "behaviors.json")
@@ -157,6 +158,7 @@ def install(args) -> None:
     for sub in DIRS:
         shutil.copytree(os.path.join(SRC, sub), os.path.join(d, sub), dirs_exist_ok=True)
     shutil.copy2(MCP_SRC, os.path.join(d, "clm_mcp.py"))
+    shutil.copy2(TURN_PICKER_SRC, os.path.join(d, "turn_picker.py"))
     mcp = register_mcp(os.path.join(d, "clm_mcp.py"))
 
     path = hooks_path()

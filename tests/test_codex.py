@@ -94,7 +94,8 @@ def test_install_copies_the_hook_and_keeps_other_hooks(tmp_path):
     assert ours == {"PreToolUse", "Stop", "SubagentStop", "PermissionRequest", "PostToolUse", "SubagentStart"}
     h = next(h for g in doc["hooks"]["PreToolUse"] for h in g["hooks"])
     assert set(h) == {"type", "command"} and "CLM_HOOK_RUNTIME=codex" in h["command"]   # Codex rejects unknown fields
-    for f in ("clm_hook.py", "clm_behaviors.py", "behaviors.json", "rubrics/behaviors.md", "clm_mcp.py"):
+    for f in ("clm_hook.py", "clm_behaviors.py", "behaviors.json", "rubrics/behaviors.md", "clm_mcp.py",
+              "turn_picker.py"):
         assert (tmp_path / "codex" / "clm" / f).exists(), f
     assert json.loads((tmp_path / "clm.json").read_text())["api_key"] == "k-1"
     assert oct(os.stat(tmp_path / "clm.json").st_mode & 0o777) == "0o600"
@@ -130,19 +131,33 @@ MCP = os.path.join(ROOT, "integrations", "codex", "clm_mcp.py")
 LONG_TASK = "Investigate why the checkout service drops orders under load and propose a fix. " * 20
 
 
-def mcp_session(tmp_path, clm_url, *msgs):
+def mcp_session(tmp_path, clm_url, *msgs, config=None, executable=None, server=None):
     cfg = tmp_path / "c.json"
-    cfg.write_text(json.dumps({"mode": "shadow", "base_url": clm_url, "api_key": "k"}))
+    cfg.write_text(json.dumps({"mode": "shadow", "base_url": clm_url, "api_key": "k", **(config or {})}))
     env = {k: v for k, v in os.environ.items() if not k.startswith(("CLM_", "CLAUDE_PLUGIN"))}
     env.update(CLM_HOOK_CONFIG=str(cfg), HOME=str(tmp_path))
-    p = subprocess.run([sys.executable, MCP], input="\n".join(json.dumps(m) for m in msgs) + "\n",
+    p = subprocess.run([executable or sys.executable, server or MCP], input="\n".join(json.dumps(m) for m in msgs) + "\n",
                        capture_output=True, text=True, env=env, timeout=30)
+    assert p.returncode == 0, p.stderr
     return [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
 
 
 def call(i, task, name="t"):
     return {"jsonrpc": "2.0", "id": i, "method": "tools/call",
             "params": {"name": "clm_pick_model", "arguments": {"task": task, "task_name": name}}}
+
+
+def turn_call(i, *candidates, task=LONG_TASK, **extra):
+    return {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+            "params": {"name": "clm_pick_turn", "arguments": {
+                "task": task, "caller": "test", "candidates": list(candidates), **extra}}}
+
+
+def turn_candidate(provider, used=None, tier="sonnet"):
+    out = {"provider": provider, "model": provider + "-" + tier, "effort": "medium", "tier": tier}
+    if used is not None:
+        out["budget"] = {"used_percent": used, "window_minutes": 300, "resets_at": 4_000_000_000}
+    return out
 
 
 def picked(reply):
@@ -159,7 +174,7 @@ def test_the_server_speaks_mcp(tmp_path):
     finally:
         clm.srv.shutdown()
     assert init["result"]["serverInfo"]["name"] == "clm" and "tools" in init["result"]["capabilities"]
-    assert [t["name"] for t in tools["result"]["tools"]] == ["clm_pick_model"]
+    assert [t["name"] for t in tools["result"]["tools"]] == ["clm_pick_model", "clm_pick_turn"]
 
 
 @pytest.mark.parametrize("probs, task, tier, model", [
@@ -189,6 +204,70 @@ def test_pick(tmp_path, probs, task, tier, model):
 def test_clm_down_means_the_middle_tier(tmp_path):
     [r] = mcp_session(tmp_path, "http://127.0.0.1:9", call(1, LONG_TASK))
     assert picked(r)["tier"] == "sonnet" and "unavailable" in picked(r)["why"]
+
+
+def test_pick_turn_uses_the_shared_policy_and_logs_asynchronously(tmp_path):
+    clm = FakeCLM({"haiku": 0.05, "sonnet": 0.9, "opus": 0.05})
+    try:
+        [reply] = mcp_session(tmp_path, clm.url,
+                              turn_call(1, turn_candidate("codex", 91), turn_candidate("claude", 20)))
+        got = picked(reply)
+        assert (got["provider"], got["tier"], got["fallback"]) == ("claude", "sonnet", False)
+        [(_, body)] = clm.systemone
+        assert body["model"] == "subagent-tier-v2"
+        assert body["state"] == hook.subagent_state({"tool_input": {
+            "description": "", "prompt": LONG_TASK, "subagent_type": "general-purpose"}})
+        assert "candidates" not in json.dumps(body["state"])
+        records = clm.wait(1)
+        assert records and records[0]["workflow"] == "routing/turn-picks"
+    finally:
+        clm.srv.shutdown()
+
+
+def test_pick_turn_validation_is_an_mcp_error(tmp_path):
+    clm = FakeCLM()
+    try:
+        [reply] = mcp_session(tmp_path, clm.url, turn_call(1, task=" "))
+    finally:
+        clm.srv.shutdown()
+    assert reply["result"]["isError"] is True
+    assert "non-empty" in reply["result"]["content"][0]["text"]
+
+
+def test_pick_turn_audit_upload_does_not_delay_the_result(monkeypatch):
+    spec2 = importlib.util.spec_from_file_location("clm_mcp_async_test", MCP)
+    mcp = importlib.util.module_from_spec(spec2)
+    spec2.loader.exec_module(mcp)
+    monkeypatch.setattr(mcp.H, "classify_subagent", lambda *_args: {
+        "choice": "sonnet", "probability": 0.9,
+        "probabilities": {"haiku": 0.05, "sonnet": 0.9, "opus": 0.05}})
+    entered = []
+    def slow_post(*_args):
+        entered.append(True)
+        __import__("time").sleep(1)
+    monkeypatch.setattr(mcp.H, "post", slow_post)
+    started = __import__("time").monotonic()
+    got = mcp.pick_turn({}, {"task": LONG_TASK, "caller": "test",
+                             "candidates": [turn_candidate("codex", 10)]}, now=lambda: 1_791_300_000)
+    assert got["tier"] == "sonnet" and __import__("time").monotonic() - started < 0.2
+    deadline = __import__("time").time() + 1
+    while not entered and __import__("time").time() < deadline:
+        __import__("time").sleep(0.01)
+    assert entered
+    mcp._close_audit()
+
+
+def test_installed_mcp_runs_in_isolation_on_system_python39(tmp_path):
+    p = run_install(tmp_path, "--key", "k")
+    assert p.returncode == 0, p.stderr
+    clm = FakeCLM({"haiku": 0.05, "sonnet": 0.9, "opus": 0.05})
+    try:
+        installed = tmp_path / "codex" / "clm" / "clm_mcp.py"
+        [reply] = mcp_session(tmp_path, clm.url, turn_call(1, turn_candidate("codex", 10)),
+                              executable="/usr/bin/python3", server=str(installed))
+        assert picked(reply)["model"] == "codex-sonnet"
+    finally:
+        clm.srv.shutdown()
 
 
 def test_a_bad_call_is_an_error_not_a_crash(tmp_path):

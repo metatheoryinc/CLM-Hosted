@@ -15,12 +15,16 @@ import json
 import os
 import sys
 import uuid
+import atexit
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)                                            # installed: next to clm_hook.py
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "claude_code"))   # in the repo
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(HERE)), "src", "clm"))
 os.environ.setdefault("CLM_HOOK_RUNTIME", "codex")
 import clm_hook as H  # noqa: E402
+import turn_picker as TP  # noqa: E402
 
 WORKFLOW = "routing/codex-model-picks"
 TIERS = ("haiku", "sonnet", "opus")
@@ -36,6 +40,54 @@ TOOL = {
                     "properties": {"task": {"type": "string", "description": "the full task message for the subagent"},
                                    "task_name": {"type": "string", "description": "the short name you will give spawn_agent"}}},
 }
+TURN_TOOL = {
+    "name": "clm_pick_turn",
+    "description": ("Pick one supplied provider/model/effort configuration for a chat turn using the trained "
+                    "capability tier and current budget snapshots. The selected tuple always comes from candidates."),
+    "inputSchema": {
+        "type": "object", "additionalProperties": False,
+        "required": ["task", "caller", "candidates"],
+        "properties": {
+            "task": {"type": "string"},
+            "context": {"type": "string"},
+            "caller": {"type": "string"},
+            "prefer": {"enum": ["codex", "claude"]},
+            "requested_tier": {"enum": list(TP.TIERS)},
+            "candidates": {
+                "type": "array", "minItems": 1,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["provider", "model", "effort", "tier"],
+                    "properties": {
+                        "provider": {"enum": ["codex", "claude"]},
+                        "model": {"type": "string"}, "effort": {"type": "string"},
+                        "tier": {"enum": list(TP.TIERS)}, "budget": {"type": ["object", "null"]},
+                    },
+                },
+            },
+        },
+    },
+}
+
+_AUDIT = None
+_AUDIT_LOCK = threading.Lock()
+
+
+def _audit_sink(cfg: dict):
+    global _AUDIT
+    with _AUDIT_LOCK:
+        if _AUDIT is None:
+            upload_cfg = dict(cfg)
+            _AUDIT = TP.AuditQueue(lambda record: H.post(upload_cfg, "/v1/decisions", record, 0.25), maxsize=64)
+    return _AUDIT.submit
+
+
+def _close_audit():
+    if _AUDIT is not None:
+        _AUDIT.close(timeout=0.25)
+
+
+atexit.register(_close_audit)
 
 
 def pick(cfg: dict, task: str, task_name: str = "") -> dict:
@@ -69,6 +121,27 @@ def pick(cfg: dict, task: str, task_name: str = "") -> dict:
     return out
 
 
+def pick_turn(cfg: dict, request: dict, *, now=None) -> dict:
+    """MCP/library adapter for the shared turn policy."""
+    task, context = request.get("task"), request.get("context", "")
+    prompt = str(task) + (("\n\nContext:\n" + str(context)) if context else "")
+    state = H.subagent_state({"tool_input": {"description": "", "prompt": prompt,
+                                             "subagent_type": "general-purpose"}})
+
+    def classify(_state, timeout):
+        return H.classify_subagent(cfg, state, timeout)
+
+    jev_classifier = None
+    if cfg.get("turn_pick_jev_enabled") and cfg.get("jev_api_key"):
+        def classify_jev(_state, timeout):
+            raw = H.jev(cfg, state, {H.QID: {"type": "choice", "instructions": H.SUBAGENT_INSTRUCTIONS,
+                                             "criteria": H.SUBAGENT_OPTIONS}}, timeout)
+            return H.jev_pick(raw) or {"error": "classification failed"}
+        jev_classifier = classify_jev
+    return TP.pick_turn(request, classify, config=cfg, now=now, jev_classifier=jev_classifier,
+                        sink=_audit_sink(cfg))
+
+
 def handle(msg: dict, cfg: dict) -> dict | None:
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:                                          # notifications need no reply
@@ -77,11 +150,19 @@ def handle(msg: dict, cfg: dict) -> dict | None:
         result = {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "clm", "version": "0.1.0"}}
     elif method == "tools/list":
-        result = {"tools": [TOOL]}
+        result = {"tools": [TOOL, TURN_TOOL]}
     elif method == "tools/call":
         p = msg.get("params") or {}
         args = p.get("arguments") or {}
-        if p.get("name") != TOOL["name"] or not str(args.get("task", "")).strip():
+        if p.get("name") == TURN_TOOL["name"]:
+            try:
+                selected = pick_turn(cfg, args)
+            except ValueError as e:
+                result = {"content": [{"type": "text", "text": "clm_pick_turn invalid request: " + str(e)}],
+                          "isError": True}
+            else:
+                result = {"content": [{"type": "text", "text": json.dumps(selected)}]}
+        elif p.get("name") != TOOL["name"] or not str(args.get("task", "")).strip():
             result = {"content": [{"type": "text", "text": "clm_pick_model needs a non-empty task"}], "isError": True}
         else:
             result = {"content": [{"type": "text", "text": json.dumps(pick(cfg, str(args["task"]), str(args.get("task_name", ""))))}]}
