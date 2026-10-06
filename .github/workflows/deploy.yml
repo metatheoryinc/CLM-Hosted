@@ -10,6 +10,9 @@
 #   deploy  waits for approval in the `prod` environment, pulumi up, records imageTag on main,
 #           waits for /health
 #
+# This repo is public, so its Actions logs are public: every job masks all of the stack's secret
+# values (and each value inside a JSON secret) before Pulumi runs, so no error can print one.
+#
 # One-time setup (infra/README.md → Deploys): Pulumi Cloud trusts this repo's GitHub OIDC
 # tokens for the `metatheory` organization, and the `prod` environment has required reviewers.
 name: deploy
@@ -30,6 +33,9 @@ concurrency:
 
 env:
   STACK: metatheory/prod
+  # the CLI the stack is deployed with locally: 3.265 parses the agentKeys JSON string as an object,
+  # and the provider's error then echoed the decrypted value
+  PULUMI_VERSION: 3.158.0
   IMAGE: ghcr.io/metatheoryinc/clm-hosted
   # what goes into the container and changes how it runs (README.md and LICENSE are only metadata)
   MATERIAL: Dockerfile .dockerignore pyproject.toml src deploy/entrypoint.sh
@@ -100,6 +106,12 @@ jobs:
           requested-token-type: urn:pulumi:token-type:access_token:organization
 
       - uses: pulumi/actions@v7      # no command: installs the Pulumi CLI
+        with:
+          pulumi-version: ${{ env.PULUMI_VERSION }}
+
+      - name: Mask the stack's secrets in this job's logs
+        working-directory: infra
+        run: ../.github/workflows/mask-secrets.sh
 
       - name: Preview
         id: preview
@@ -109,8 +121,8 @@ jobs:
             pulumi config set imageTag "${{ steps.image.outputs.tag }}" --stack "$STACK"
           fi
           if ! pulumi preview --stack "$STACK" --json > preview.json; then
-            # in --json mode Pulumi writes its errors into the JSON, not the log
-            jq -r '.diagnostics[]? | "\(.severity): \(.message)"' preview.json 2>/dev/null || cat preview.json
+            # in --json mode Pulumi writes its errors into the JSON, not the log (secrets are masked)
+            jq -r '.diagnostics[]? | "\(.severity): \(.message)"' preview.json 2>/dev/null || echo "preview failed"
             exit 1
           fi
           changes=$(jq '[.changeSummary // {} | to_entries[] | select(.key != "same") | .value] | add // 0' preview.json)
@@ -147,6 +159,12 @@ jobs:
           requested-token-type: urn:pulumi:token-type:access_token:organization
 
       - uses: pulumi/actions@v7
+        with:
+          pulumi-version: ${{ env.PULUMI_VERSION }}
+
+      - name: Mask the stack's secrets in this job's logs
+        working-directory: infra
+        run: ../.github/workflows/mask-secrets.sh
 
       - name: pulumi up
         working-directory: infra
