@@ -45,8 +45,9 @@ python3 integrations/codex/install.py uninstall
 Codex encrypts the task it hands a spawned agent, so the hook can't choose its model. Instead the
 installer registers an MCP server, `clm`, with one tool the main agent calls itself:
 `clm_pick_model(task)`. CLM's trained subagent-tier head reads the task and returns a Codex model and
-reasoning effort; when CLM is unsure it picks one tier *up*, so a cheap main chat hands hard work to a
-stronger model rather than a weaker one. Add this to your `AGENTS.md`:
+reasoning effort. An unsure lookup goes up to the middle tier, so a cheap main chat hands work to a
+stronger model rather than a weaker one; the top tier, the most expensive, needs CLM to be sure
+(p >= 0.95, `pick_top_threshold`), and a less certain top-tier lean gets the middle tier. Add this to your `AGENTS.md`:
 
 ```markdown
 Before you call spawn_agent, call the clm_pick_model tool with the task exactly as you will give it
@@ -57,9 +58,9 @@ to the subagent, and pass the model and reasoning_effort it returns to spawn_age
 |---|---|---|
 | haiku (look something up) | gpt-5.6-luna | low |
 | sonnet (a well-defined change) | gpt-5.6-terra | medium |
-| opus (design, root causes, review) | gpt-6-astra | high |
+| opus (design, root causes, review) | gpt-5.6-sol | high |
 
-Change the mapping with `{"codex": {"pick_models": {"opus": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}}}}`
+Change the mapping with `{"codex": {"pick_models": {"opus": {"model": "gpt-6-astra", "reasoning_effort": "high"}}}}`
 in the config file, and the confidence bar with `"pick_threshold"` (0.8). A task shorter than 1000
 characters never goes to the lookup tier (the head wasn't trained on short prompts). If CLM is
 unreachable the tool answers the middle tier. The installer marks the tool as not needing approval

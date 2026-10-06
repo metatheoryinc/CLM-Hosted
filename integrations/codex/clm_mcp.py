@@ -5,7 +5,8 @@ Codex encrypts the task it hands a spawned agent, so a hook cannot read it; the 
 describes the task to this tool instead (AGENTS.md tells it to, before `spawn_agent`). CLM's
 subagent-tier head answers haiku / sonnet / opus; each tier maps to a Codex model and reasoning
 effort (``codex.pick_models`` in ~/.config/clm/claude-code.json). The main chat runs on a small
-model and hands work up, so when CLM is unsure it picks one tier up. Every pick is logged as
+model and hands work up: an unsure lookup goes to the middle tier, while the top tier needs CLM to be
+sure (``pick_top_threshold``, 0.95), since it costs the most. Every pick is logged as
 ``routing/codex-model-picks``. Standard library only; installed by integrations/codex/install.py.
 """
 from __future__ import annotations
@@ -25,7 +26,7 @@ WORKFLOW = "routing/codex-model-picks"
 TIERS = ("haiku", "sonnet", "opus")
 DEFAULT_MODELS = {"haiku": {"model": "gpt-5.6-luna", "reasoning_effort": "low"},
                   "sonnet": {"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
-                  "opus": {"model": "gpt-6-astra", "reasoning_effort": "high"}}
+                  "opus": {"model": "gpt-5.6-sol", "reasoning_effort": "high"}}
 TOOL = {
     "name": "clm_pick_model",
     "description": ("Pick the model and reasoning effort for a subagent before you call spawn_agent. Pass the task "
@@ -40,21 +41,25 @@ TOOL = {
 def pick(cfg: dict, task: str, task_name: str = "") -> dict:
     models = {**DEFAULT_MODELS, **(cfg.get("pick_models") or {})}
     threshold = float(cfg.get("pick_threshold", 0.8))
+    top = float(cfg.get("pick_top_threshold", 0.95))
     state = H.subagent_state({"tool_input": {"description": task_name, "prompt": task, "subagent_type": "general-purpose"}})
     clm = H.classify_subagent(cfg, state, float(cfg.get("subagent_timeout", 1.5)) * 2)
     if "error" in clm:
         tier, why = "sonnet", f"CLM unavailable ({clm['error'][:80]}); using the middle tier"
-    elif clm["probability"] >= threshold:
+    elif clm["choice"] == "opus":               # the top tier costs most: only when CLM is sure
+        tier = "opus" if clm["probability"] >= top else "sonnet"
+        why = (f"CLM: opus (p={clm['probability']:.2f})" if tier == "opus" else
+               f"CLM leaned opus (p={clm['probability']:.2f}), below the {top:.2f} bar for the top tier, so sonnet")
+    elif clm["choice"] == "haiku" and clm["probability"] < threshold:   # an unsure lookup: err toward quality
+        tier, why = "sonnet", f"CLM leaned haiku (p={clm['probability']:.2f}) but was unsure, so sonnet"
+    else:
         tier, why = clm["choice"], f"CLM: {clm['choice']} (p={clm['probability']:.2f})"
-    else:                                       # unsure: err toward quality
-        tier = TIERS[min(TIERS.index(clm["choice"]) + 1, len(TIERS) - 1)]
-        why = f"CLM leaned {clm['choice']} (p={clm['probability']:.2f}) but was unsure, so one tier up: {tier}"
     if len(task) < int(cfg.get("subagent_min_prompt_chars", 1000)) and tier == "haiku":
         tier, why = "sonnet", why + "; the task is too short for CLM to judge a lookup, so sonnet"
     out = {"tier": tier, **models[tier], "why": why}
     try:
         H.post(cfg, "/v1/decisions", {
-            "id": uuid.uuid4().hex, "workflow": WORKFLOW, "created_at": H.now(), "mode": "active", "threshold": threshold,
+            "id": uuid.uuid4().hex, "workflow": WORKFLOW, "created_at": H.now(), "mode": "active", "threshold": top if tier == "opus" else threshold,
             "state": state, "questions": {H.QID: {"type": "choice", "instructions": H.SUBAGENT_INSTRUCTIONS,
                                                    "criteria": H.SUBAGENT_OPTIONS}},
             "clm": clm, "acted": "clm" if "error" not in clm else "baseline", "worker": tier,
