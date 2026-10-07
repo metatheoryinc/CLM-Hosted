@@ -5,3 +5,6 @@
 !src/
 !deploy/entrypoint.sh
 **/__pycache__
+# The public site ships through Cloudflare Pages (tools/deploy-site.sh), not the
+# RunPod image.  Keep this after !src/ so it wins the Docker ignore precedence.
+src/clm/static/

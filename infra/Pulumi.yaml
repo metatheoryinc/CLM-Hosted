@@ -42,6 +42,10 @@ config:
     type: string
     secret: true
     # upstream key between the gateway and the Pod; agents never see it
+  siteOrigin:
+    type: string
+    default: https://clm-site.pages.dev
+    # the Cloudflare Pages project serving the website (tools/deploy-site.sh)
   anthropicApiKey:
     type: string
     secret: true
@@ -190,6 +194,9 @@ resources:
         - name: ANTHROPIC_API_KEY
           type: secret_text
           text: ${anthropicApiKey}
+        - name: SITE_ORIGIN
+          type: plain_text
+          text: ${siteOrigin}
         - name: AI_GATEWAY_URL
           type: plain_text
           text: ${aiGatewayUrl}

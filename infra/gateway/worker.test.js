@@ -16,7 +16,7 @@ globalThis.fetch = async (req) => {
 };
 const { default: worker } = await import("./worker.js");
 let allow = true;
-const env = { AGENT_KEYS: JSON.stringify({ alpha: "key-a", beta: "key-b" }), UPSTREAM_KEY: "UP",
+const env = { AGENT_KEYS: JSON.stringify({ alpha: "key-a", beta: "key-b" }), UPSTREAM_KEY: "UP", SITE_ORIGIN: "https://site.example.pages.dev",
               LIMITER: { limit: async ({ key }) => ({ success: allow, key }) } };
 const req = (path, auth, method = "POST") => new Request("https://clm.example.com" + path,
   { method, headers: auth ? { Authorization: auth } : {}, body: method === "POST" ? "{}" : undefined });
@@ -92,6 +92,7 @@ for (const path of publicPaths) {
     assert.equal((await worker.fetch(request, env)).status, 200, `${method} ${path} is public`);
     assert.equal(seen.length, beforePublic + 1, `${method} ${path} reaches the origin`);
     const forwarded = seen.at(-1);
+    assert.equal(new URL(forwarded.url).origin, "https://site.example.pages.dev", `${path} is served from the site origin`);
     assert.equal(forwarded.headers.get("Authorization"), null, `${path} strips authorization`);
     assert.equal(forwarded.headers.get("Cookie"), null, `${path} strips cookies`);
     assert.equal(forwarded.headers.get("Cf-Access-Jwt-Assertion"), null, `${path} strips Access JWTs`);

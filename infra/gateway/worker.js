@@ -321,18 +321,21 @@ export default {
     if (url.pathname === "/login" || url.pathname.startsWith("/login/")) return loginRoutes(request, env, url);
     if (url.pathname.startsWith("/v1/auth/")) return deviceRoutes(request, env, url);
 
-    const publicPaths = new Set([
-      "/", "/index.html", "/playground", "/playground/",
-      "/home.css", "/home.js", "/app.css", "/app.js",
-      "/guides/claude-code", "/guides/claude-code/", "/guides/codex", "/guides/codex/",
-      "/guides/mipmap", "/guides/mipmap/",
-    ]);
-    if (publicPaths.has(url.pathname) && (request.method === "GET" || request.method === "HEAD")) {
+    // the website lives on Cloudflare Pages (SITE_ORIGIN), not in the Pod image, so a site
+    // update is `tools/deploy-site.sh` with no image rebuild
+    const sitePath = {
+      "/": "/home", "/index.html": "/", "/playground": "/", "/playground/": "/",
+      "/home.css": "/home.css", "/home.js": "/home.js", "/app.css": "/app.css", "/app.js": "/app.js",
+      "/guides/claude-code": "/guide-claude-code", "/guides/claude-code/": "/guide-claude-code",
+      "/guides/codex": "/guide-codex", "/guides/codex/": "/guide-codex",
+      "/guides/mipmap": "/guide-mipmap", "/guides/mipmap/": "/guide-mipmap",
+    }[url.pathname];
+    if (sitePath && env.SITE_ORIGIN && (request.method === "GET" || request.method === "HEAD")) {
       const headers = new Headers();
       for (const name of ["Accept", "Accept-Language", "If-Modified-Since", "If-None-Match"]) {
         const value = request.headers.get(name); if (value) headers.set(name, value);
       }
-      return fetch(new Request(url, { method: request.method, headers }));
+      return fetch(new Request(new URL(sitePath + url.search, env.SITE_ORIGIN), { method: request.method, headers }));
     }
 
     // unauthenticated liveness for uptime checks: only whether the Pod and its encoder
