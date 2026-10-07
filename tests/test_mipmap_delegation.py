@@ -37,3 +37,12 @@ def test_seed_records_are_balanced_deterministic_and_family_disjoint():
     test_families = {r["meta"]["family"] for r in first if r["meta"]["split"] == "test"}
     assert train_families and test_families and train_families.isdisjoint(test_families)
     assert all(json.loads(json.dumps(r))["state"] == r["state"] for r in first)
+
+
+def test_write_seed_emits_jsonl_consumable_by_clm_decisions(tmp_path):
+    out = tmp_path / "seed.jsonl"
+
+    policy.write_seed(out)
+
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert records == policy.seed_records()

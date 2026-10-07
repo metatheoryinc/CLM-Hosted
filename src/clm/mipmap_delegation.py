@@ -5,6 +5,8 @@ state and question text stable once a head has been trained against them.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import re
 
 
@@ -88,3 +90,10 @@ def seed_records() -> list[dict]:
                 "meta": {"source": "synthetic-v1", "family": family, "split": split},
             })
     return records
+
+
+def write_seed(path: str | Path) -> None:
+    """Write the reproducible bootstrap corpus as JSONL for ``clm-decisions``."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in seed_records()), encoding="utf-8")
