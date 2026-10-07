@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from clm import mipmap_delegation as policy
 
 
@@ -10,6 +12,18 @@ def test_state_and_question_are_stable_and_redact_secrets():
         "request": "Please rotate api_key=[REDACTED] and investigate the failed deploy",
         "active_buddies": 2,
     }
+
+
+@pytest.mark.parametrize("task, secret", [
+    ("Investigate Authorization: Bearer abcdef0123456789xyz", "abcdef0123456789xyz"),
+    ("Deploy with api_key=abc", "abc"),
+    ("Use -----BEGIN RSA PRIVATE KEY-----\\nMIIEow\\n-----END RSA PRIVATE KEY-----", "MIIEow"),
+])
+def test_build_state_redacts_all_credential_formats(task, secret):
+    state = policy.build_state(task)
+
+    assert "[REDACTED" in state["request"]
+    assert secret not in state["request"]
     assert policy.question() == {
         "route": {
             "type": "choice",

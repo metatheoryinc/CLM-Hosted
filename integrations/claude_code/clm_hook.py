@@ -134,7 +134,7 @@ SUBAGENT_MAX_INSTRUCTIONS = 1200
 SECRET_PATTERNS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"(?i)((?:api[_-]?key|access[_-]?key|secret|token|password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)"
-                r"[^\s\"',;]{4,}"), r"\1[REDACTED]"),
+                r"[^\s\"',;]+"), r"\1[REDACTED]"),
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"
                 r"xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,})"), "[REDACTED]"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"),

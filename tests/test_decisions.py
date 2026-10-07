@@ -245,6 +245,24 @@ def test_export_honors_an_explicit_family_disjoint_split(tmp_path):
     assert train_families.isdisjoint(test_families)
 
 
+def test_export_uses_id_split_when_labelled_record_metadata_is_not_a_dict(tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    record = rec(1, "writer", 0.9, "writer", gold="reviewer")
+    record["meta"] = "legacy metadata"
+    src = tmp_path / "decisions.jsonl"
+    src.write_text(json.dumps(record) + "\n")
+
+    cli(["export", str(src), "--out", str(tmp_path / "data")])
+
+    rows = [
+        row
+        for split in ("train", "test")
+        if (path := tmp_path / "data" / "routing/chief" / f"{split}-00000.parquet").exists()
+        for row in pq.read_table(path).to_pylist()
+    ]
+    assert [row["id"] for row in rows] == ["r1"]
+
+
 def test_outcomes_from_another_agent_are_ignored():
     r = dict(rec(1, "writer", 0.9, "writer"), agent="alpha")
     ours = {"event": "outcome", "id": "r1", "label": "reviewer", "agent": "alpha", "created_at": "t1"}

@@ -280,7 +280,7 @@ def split_of(rid: str, test_frac: float) -> str:
 def export(args) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
-    rows = [(row, (r.get("meta") or {}).get("split"))
+    rows = [(row, r["meta"].get("split") if isinstance(r.get("meta"), dict) else None)
             for r in load(args.sources, args.workflow) if (row := to_row(r, args.labels))]
     if not rows:
         raise SystemExit("no labelled decisions to export (label them with outcomes, or use --labels baseline)")
