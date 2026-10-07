@@ -20,3 +20,5 @@ config:
     secure: AAABAGVApCxrt7NcAuz2WvvEAJdL+PMUuxP9d+M9uvhFZAqNZfNjzPWz1TLYCvq4crwNQt5x71fDD35GvRkCI6+Rpg==
   clm-hosted:decisionReaders:
     - jt@metatheory.gg
+  clm-hosted:anthropicApiKey:
+    secure: AAABAD+VC5uV5/CYJqQLpyNkN/mcDob0IQ0ynFzLr+G676b6pBYyqfWvoHAlk7uURixBufxofv+r01xPG/fzjvQhUKcEVOEEjePkXzr9zBneEcVU+DzZfYtCE8WjsYW65pgyPfGXXe/u5qxKT8CeA2NOGMYtuim6OJQLI7ikn4vXgpjfEaVoSRG8
