@@ -280,12 +280,14 @@ def split_of(rid: str, test_frac: float) -> str:
 def export(args) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
-    rows = [row for r in load(args.sources, args.workflow) if (row := to_row(r, args.labels))]
+    rows = [(row, r["meta"].get("split") if isinstance(r.get("meta"), dict) else None)
+            for r in load(args.sources, args.workflow) if (row := to_row(r, args.labels))]
     if not rows:
         raise SystemExit("no labelled decisions to export (label them with outcomes, or use --labels baseline)")
     groups = defaultdict(list)
-    for row in rows:
-        groups[(row["workflow"], split_of(row["id"], args.test_frac))].append(row)
+    for row, explicit_split in rows:
+        split = explicit_split if explicit_split in ("train", "test") else split_of(row["id"], args.test_frac)
+        groups[(row["workflow"], split)].append(row)
     for (workflow, split), rs in sorted(groups.items()):
         d = os.path.join(args.out, workflow)
         os.makedirs(d, exist_ok=True)

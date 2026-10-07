@@ -157,6 +157,7 @@ def test_garbage_input_never_breaks_the_session():
 @pytest.mark.parametrize("text", [
     "curl -H 'Authorization: Bearer abcdef0123456789xyz' https://x",
     "export API_KEY=hunter2hunter2", "password: s3cretpass", "git push https://ghp_abcdefghijklmnopqrstuvwx@github.com",
+    "Deploy with api_key=abc",
     "aws configure set aws_access_key_id AKIAABCDEFGHIJKLMNOP", "key 0123456789abcdef0123456789abcdef01",
     "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----", "OPENAI sk-proj-abcdefghijklmnopqrstuv",
 ])
@@ -164,7 +165,7 @@ def test_secrets_are_redacted(text):
     out = hook.redact(text)
     assert "[REDACTED" in out
     for secret in ("abcdef0123456789xyz", "hunter2hunter2", "s3cretpass", "ghp_abcdefghijklmnopqrstuvwx",
-                   "AKIAABCDEFGHIJKLMNOP", "0123456789abcdef0123456789abcdef01", "MIIEow", "sk-proj-abcdefghijklmnopqrstuv"):
+                   "AKIAABCDEFGHIJKLMNOP", "0123456789abcdef0123456789abcdef01", "MIIEow", "sk-proj-abcdefghijklmnopqrstuv", "abc"):
         assert secret not in out
 
 

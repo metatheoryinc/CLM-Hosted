@@ -226,6 +226,43 @@ def test_export_is_readable_by_the_trainer(tmp_path):
     assert to_row(rec(5, "writer", 0.9, "writer"), "baseline")["gold"] == json.dumps({"route": {"label": "writer"}})
 
 
+def test_export_honors_an_explicit_family_disjoint_split(tmp_path):
+    from clm.mipmap_delegation import WORKFLOW, seed_records
+
+    pq = pytest.importorskip("pyarrow.parquet")
+    src = tmp_path / "mipmap-seed.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in seed_records()))
+    out = tmp_path / "data"
+
+    cli(["export", str(src), "--workflow", WORKFLOW, "--out", str(out), "--labels", "baseline"])
+
+    root = out / WORKFLOW
+    train = pq.read_table(root / "train-00000.parquet").to_pylist()
+    test = pq.read_table(root / "test-00000.parquet").to_pylist()
+    assert len(train) == 96 and len(test) == 48
+    train_families = {json.loads(row["state"])["request"].split(":", 1)[0] for row in train}
+    test_families = {json.loads(row["state"])["request"].split(":", 1)[0] for row in test}
+    assert train_families.isdisjoint(test_families)
+
+
+def test_export_uses_id_split_when_labelled_record_metadata_is_not_a_dict(tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    record = rec(1, "writer", 0.9, "writer", gold="reviewer")
+    record["meta"] = "legacy metadata"
+    src = tmp_path / "decisions.jsonl"
+    src.write_text(json.dumps(record) + "\n")
+
+    cli(["export", str(src), "--out", str(tmp_path / "data")])
+
+    rows = [
+        row
+        for split in ("train", "test")
+        if (path := tmp_path / "data" / "routing/chief" / f"{split}-00000.parquet").exists()
+        for row in pq.read_table(path).to_pylist()
+    ]
+    assert [row["id"] for row in rows] == ["r1"]
+
+
 def test_outcomes_from_another_agent_are_ignored():
     r = dict(rec(1, "writer", 0.9, "writer"), agent="alpha")
     ours = {"event": "outcome", "id": "r1", "label": "reviewer", "agent": "alpha", "created_at": "t1"}
